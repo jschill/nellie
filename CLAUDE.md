@@ -78,6 +78,9 @@ Run all of these before calling a change done.
   The prompt hides input on a terminal (`golang.org/x/term`), since the URL
   usually holds the admin password; empty input means pgx's local defaults.
   `~/.pgpass` works via pgx in every case.
+- `cli.Run` loads `.env` from the current directory first (own small parser
+  in `internal/cli/dotenv.go`, no dependency). Variables already set in the
+  environment win. `.env` is gitignored; `.env.example` shows the format.
 - All prompts in a command share one `prompter` (`internal/cli/prompt.go`):
   `bufio.Scanner` reads ahead, so a second scanner on stdin can lose input.
   Prompts go to stderr, so stdout stays clean.

@@ -35,6 +35,10 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprint(stderr, usage)
 		return exitUsage
 	}
+	if err := loadDotenv(".env"); err != nil {
+		fmt.Fprintf(stderr, "nellie: reading .env: %v\n", err)
+		return exitError
+	}
 	switch args[0] {
 	case "add-project":
 		return addProject(args[1:], stdin, stdout, stderr)
@@ -49,6 +53,7 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 
 // connConfig resolves the admin connection, in order: the --dsn flag,
 // $DATABASE_URL, the standard PG* environment variables, and finally asking.
+// The environment variables may come from a .env file (see loadDotenv).
 // Whatever pgx gets, it also reads ~/.pgpass, like psql.
 func connConfig(dsn string, p *prompter) (*pgx.ConnConfig, error) {
 	if dsn == "" {
@@ -64,7 +69,8 @@ func connConfig(dsn string, p *prompter) (*pgx.ConnConfig, error) {
 
 	for {
 		// Hidden, because the URL usually contains the admin password.
-		dsn, err := p.secret("Admin connection URL (hidden; e.g. postgres://user:pass@localhost:5432/postgres,\nor empty for local defaults): ")
+		dsn, err := p.secret("Admin connection URL, e.g. postgres://user:pass@localhost:5432/postgres\n" +
+			"(input hidden; empty for local defaults; put DATABASE_URL in .env to skip this): ")
 		if err != nil {
 			return nil, fmt.Errorf("reading connection URL: %w", err)
 		}
