@@ -1,0 +1,60 @@
+package cli
+
+import (
+	"bufio"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"strings"
+
+	"golang.org/x/term"
+)
+
+// prompter reads answers from stdin. Every prompt in a command must go
+// through the same prompter: bufio.Scanner reads ahead, so a second scanner
+// on the same stdin could find its input already swallowed by the first.
+type prompter struct {
+	in  *bufio.Scanner
+	out io.Writer
+	fd  int // stdin's file descriptor if it's a terminal, otherwise -1
+}
+
+func newPrompter(stdin io.Reader, out io.Writer) *prompter {
+	fd := -1
+	// A type assertion: is this io.Reader really an *os.File underneath?
+	if f, ok := stdin.(*os.File); ok && term.IsTerminal(int(f.Fd())) {
+		fd = int(f.Fd())
+	}
+	return &prompter{in: bufio.NewScanner(stdin), out: out, fd: fd}
+}
+
+// errNoInput means stdin ended before an answer was given.
+var errNoInput = errors.New("no input")
+
+// line prints label and returns the next line of input, trimmed.
+func (p *prompter) line(label string) (string, error) {
+	fmt.Fprint(p.out, label)
+	if !p.in.Scan() {
+		fmt.Fprintln(p.out)
+		if err := p.in.Err(); err != nil {
+			return "", err
+		}
+		return "", errNoInput
+	}
+	return strings.TrimSpace(p.in.Text()), nil
+}
+
+// secret is like line, but doesn't echo what's typed when stdin is a terminal.
+func (p *prompter) secret(label string) (string, error) {
+	if p.fd < 0 {
+		return p.line(label)
+	}
+	fmt.Fprint(p.out, label)
+	b, err := term.ReadPassword(p.fd)
+	fmt.Fprintln(p.out) // the Enter key wasn't echoed either
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(b)), nil
+}
