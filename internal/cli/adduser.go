@@ -10,10 +10,14 @@ import (
 	"github.com/jschill/nellie/internal/pg"
 )
 
-const addUserHelp = `Asks for a project and a user name, then creates a login role that can read
-and write rows in the project's tables, but can't change the schema. That
-covers the tables that exist now and the ones the project's owner creates
-later, so run migrations as the owner.
+const addUserHelp = `Asks for a project, a user type and a name, then creates a login role named
+<project>_<something> in the project:
+
+  Application  reads and writes rows in the project's tables, but can't change
+               the schema. Covers tables that exist now and ones the owner
+               creates later, so run migrations as the owner or an admin user.
+  Admin        can do everything the owner can, and acts as the owner, so
+               tables it creates belong to the owner.
 `
 
 func addUser(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
@@ -51,13 +55,25 @@ func addUser(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return fail(stderr, err)
 	}
 
-	fmt.Fprintf(stdout, `Off she went with a trumpety-trump: %s can now read and write in %s.
+	what := "can now read and write in"
+	if user.Kind == pg.AdminUser {
+		what = "can now do everything in"
+	}
+	fmt.Fprintf(stdout, `Off she went with a trumpety-trump: %s %s %s.
 
   %s
 
 The password is shown once and stored nowhere else.
-`, user.Name, user.Project, connURL(cfg, user.Name, password, user.Project))
+`, user.Name, what, user.Project, connURL(cfg, user.Name, password, user.Project))
 	return exitOK
+}
+
+var userKinds = []struct {
+	kind pg.UserKind
+	choice
+}{
+	{pg.AppUser, choice{key: "app", label: "Application", desc: "reads and writes rows, can't change the schema"}},
+	{pg.AdminUser, choice{key: "admin", label: "Admin", desc: "can do everything, like the owner"}},
 }
 
 func promptUser(p *prompter) (pg.User, error) {
@@ -65,9 +81,20 @@ func promptUser(p *prompter) (pg.User, error) {
 	if err != nil {
 		return pg.User{}, err
 	}
-	name, err := p.ask("User name", "user name", project.Name+pg.DefaultUserSuffix, pg.ValidateUserName)
+
+	choices := make([]choice, len(userKinds))
+	for i, k := range userKinds {
+		choices[i] = k.choice
+	}
+	i, err := p.choose("User type", choices)
 	if err != nil {
 		return pg.User{}, err
 	}
-	return pg.NewUser(name, project.Name)
+	kind := userKinds[i].kind
+
+	name, err := p.prefixed("User name", project.Name+"_", kind.DefaultSuffix(), pg.MaxNameLen, pg.IsNameChar)
+	if err != nil {
+		return pg.User{}, err
+	}
+	return pg.NewUser(kind, name, project.Name)
 }

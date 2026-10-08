@@ -84,6 +84,10 @@ Run all of these before calling a change done.
 - All prompts in a command share one `prompter` (`internal/cli/prompt.go`):
   `bufio.Scanner` reads ahead, so a second scanner on stdin can lose input.
   Prompts go to stderr, so stdout stays clean.
+- Interactive widgets (menu, prefixed input) live in `internal/cli/tui.go`:
+  raw mode via `x/term`, ANSI escapes, no UI library. Each has a plain line
+  fallback when stdin isn't a terminal, which is what the tests exercise.
+  One `Read` can hold several keys, so input is always split per byte.
 - The admin role needs `CREATEROLE` and `CREATEDB`. Superuser is not required —
   don't add features that silently need it.
 - Postgres 15 or newer (checked at runtime): the grants rely on the public
@@ -99,21 +103,30 @@ more restricted users are added separately.
     from `PUBLIC` and granted to the owner.
   - the role `<name>` (`LOGIN`): owns the database and its public schema, so
     it can do everything, including running migrations.
-- `add-user` creates a `LOGIN` role (default name `<project>_app`) in an
-  existing project with `SELECT, INSERT, UPDATE, DELETE` on tables and
-  `USAGE, SELECT` on sequences. No DDL, no `TRUNCATE`. It covers tables that
-  exist now (`GRANT ... ON ALL TABLES`) and ones the database owner creates
-  later (`ALTER DEFAULT PRIVILEGES FOR ROLE <owner>`), so migrations **must**
-  run as the owner or new tables are invisible to the user. The owner is
-  looked up in `pg_database`, so it also works for databases nellie didn't
-  create, as long as the admin is a member of their owner.
+- `add-user` asks for a project, a user type (arrow-key menu) and a name,
+  and creates a `LOGIN` role in an existing project. User names are always
+  `<project>_<suffix>`; only the suffix can be edited (default `app` or
+  `admin`). Two types:
+  - **Application** (default): `SELECT, INSERT, UPDATE, DELETE` on tables
+    and `USAGE, SELECT` on sequences. No DDL, no `TRUNCATE`. Covers tables
+    that exist now (`GRANT ... ON ALL TABLES`) and ones the owner creates
+    later (`ALTER DEFAULT PRIVILEGES FOR ROLE <owner>`), so migrations
+    **must** run as the owner (or an admin user) or new tables are invisible
+    to app users.
+  - **Admin**: member of the owner role, plus
+    `ALTER ROLE <user> IN DATABASE <db> SET role TO '<owner>'`, so its
+    sessions act as the owner and whatever it creates is owned by the owner.
+    That keeps the default privileges for app users working.
+- The owner is looked up in `pg_database`, so `add-user` also works for
+  databases nellie didn't create, as long as the admin is a member of their
+  owner.
 - The admin role grants itself membership in each project owner and keeps it:
   on Postgres 16+ `CREATEROLE` no longer implies it, and
   `CREATE DATABASE ... OWNER`, `GRANT ... ON ALL TABLES` and
   `ALTER DEFAULT PRIVILEGES FOR ROLE` need it.
 - Names: `^[a-z][a-z0-9_]*$`, no `pg_` prefix, so they're valid unquoted
-  identifiers. Users max 63 chars; projects max 59, so the default
-  `<project>_app` still fits.
+  identifiers. Users max 63 chars; projects max 57, so the default
+  `<project>_admin` still fits.
 
 ## Safety rules
 

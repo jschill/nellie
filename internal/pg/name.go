@@ -7,13 +7,13 @@ import (
 	"strings"
 )
 
-// maxIdentifierLen is Postgres's limit for database and role names (NAMEDATALEN - 1).
+// MaxNameLen is Postgres's limit for database and role names (NAMEDATALEN - 1).
 // Longer names aren't rejected by Postgres, they're silently truncated.
-const maxIdentifierLen = 63
+const MaxNameLen = 63
 
-// MaxProjectNameLen leaves room for the suffix of the default user name
-// (<project>_app), so that one always fits too.
-const MaxProjectNameLen = maxIdentifierLen - len(DefaultUserSuffix)
+// MaxProjectNameLen leaves room for the longest default user name
+// (<project>_admin), so the suggested names always fit.
+const MaxProjectNameLen = MaxNameLen - len("_"+adminSuffix)
 
 // Lowercase only, so names never need quoting in SQL or psql. Postgres would
 // also allow "$" and non-ASCII letters, but those are more trouble than
@@ -26,9 +26,22 @@ func ValidateProjectName(name string) error {
 	return validateName("project", name, MaxProjectNameLen)
 }
 
-// ValidateUserName reports whether name can be used as a role name.
-func ValidateUserName(name string) error {
-	return validateName("user", name, maxIdentifierLen)
+// ValidateUserName reports whether name can be used as the name of a user in
+// project: a valid role name that starts with "<project>_".
+func ValidateUserName(name, project string) error {
+	if err := validateName("user", name, MaxNameLen); err != nil {
+		return err
+	}
+	prefix := project + "_"
+	if !strings.HasPrefix(name, prefix) || len(name) == len(prefix) {
+		return fmt.Errorf("user name must be %s followed by at least one character", prefix)
+	}
+	return nil
+}
+
+// IsNameChar reports whether c may appear in a name after its first character.
+func IsNameChar(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '_'
 }
 
 func validateName(kind, name string, maxLen int) error {

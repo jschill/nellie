@@ -8,49 +8,85 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// DefaultUserSuffix is appended to a project name to suggest a user name.
-const DefaultUserSuffix = "_app"
+// UserKind is what a project user may do.
+type UserKind int
 
-// User is a login role that can read and write rows in a project's public
-// schema, but can't change the schema.
-type User struct {
-	Name    string
-	Project string // the database
+const (
+	// AppUser reads and writes rows, but can't change the schema.
+	AppUser UserKind = iota
+	// AdminUser can do everything the project owner can. Its sessions act as
+	// the owner, so objects it creates belong to the owner, and default
+	// privileges given to app users cover them.
+	AdminUser
+)
+
+// Default user name suffixes, after "<project>_".
+const (
+	appSuffix   = "app"
+	adminSuffix = "admin"
+)
+
+// DefaultSuffix suggests what comes after "<project>_" in the user's name.
+func (k UserKind) DefaultSuffix() string {
+	if k == AdminUser {
+		return adminSuffix
+	}
+	return appSuffix
 }
 
-// NewUser validates both names.
-func NewUser(name, project string) (User, error) {
-	if err := ValidateUserName(name); err != nil {
-		return User{}, err
-	}
+// User is a login role in a project.
+type User struct {
+	Name    string // always "<Project>_<something>"
+	Project string // the database
+	Kind    UserKind
+}
+
+// NewUser validates the names.
+func NewUser(kind UserKind, name, project string) (User, error) {
 	if err := ValidateProjectName(project); err != nil {
 		return User{}, err
 	}
-	return User{Name: name, Project: project}, nil
+	if err := ValidateUserName(name, project); err != nil {
+		return User{}, err
+	}
+	return User{Name: name, Project: project, Kind: kind}, nil
 }
 
 // Plan returns the SQL for creating u. owner is the role that owns the
 // project database; secret is used as described for Project.Plan.
 func (u User) Plan(owner, secret string) Plan {
 	user, db, own := ident(u.Name), ident(u.Project), ident(owner)
-	return Plan{
+	plan := Plan{
 		Roles: []string{
 			fmt.Sprintf("CREATE ROLE %s LOGIN PASSWORD %s", user, literal(secret)),
 		},
 		DBGrants: []string{
 			fmt.Sprintf("GRANT CONNECT ON DATABASE %s TO %s", db, user),
 		},
-		SchemaGrants: []string{
-			fmt.Sprintf("GRANT USAGE ON SCHEMA public TO %s", user),
-			// Tables and sequences that already exist...
-			fmt.Sprintf("GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO %s", user),
-			fmt.Sprintf("GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO %s", user),
-			// ...and the ones the owner creates later. Only the owner's: tables
-			// created by any other role aren't covered.
-			fmt.Sprintf("ALTER DEFAULT PRIVILEGES FOR ROLE %s IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO %s", own, user),
-			fmt.Sprintf("ALTER DEFAULT PRIVILEGES FOR ROLE %s IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO %s", own, user),
-		},
 	}
+
+	if u.Kind == AdminUser {
+		plan.Roles = append(plan.Roles,
+			// Membership gives it all of the owner's privileges...
+			fmt.Sprintf("GRANT %s TO %s", own, user),
+			// ...and this makes every session in the project database start with
+			// SET ROLE <owner>, so what it creates is owned by the owner.
+			fmt.Sprintf("ALTER ROLE %s IN DATABASE %s SET role TO %s", user, db, literal(owner)),
+		)
+		return plan
+	}
+
+	plan.SchemaGrants = []string{
+		fmt.Sprintf("GRANT USAGE ON SCHEMA public TO %s", user),
+		// Tables and sequences that already exist...
+		fmt.Sprintf("GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO %s", user),
+		fmt.Sprintf("GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO %s", user),
+		// ...and the ones the owner creates later. Only the owner's: tables
+		// created by any other role aren't covered.
+		fmt.Sprintf("ALTER DEFAULT PRIVILEGES FOR ROLE %s IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO %s", own, user),
+		fmt.Sprintf("ALTER DEFAULT PRIVILEGES FOR ROLE %s IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO %s", own, user),
+	}
+	return plan
 }
 
 // AddUser creates u in its project on the server described by cfg. If a step
@@ -93,6 +129,9 @@ func AddUser(ctx context.Context, cfg *pgx.ConnConfig, u User, password string) 
 		}
 	}()
 
+	if len(plan.SchemaGrants) == 0 {
+		return nil
+	}
 	proj, err := connectTo(ctx, cfg, u.Project)
 	if err != nil {
 		return err

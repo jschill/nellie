@@ -17,16 +17,17 @@ import (
 type prompter struct {
 	in  *bufio.Scanner
 	out io.Writer
-	fd  int // stdin's file descriptor if it's a terminal, otherwise -1
+	tty *os.File // stdin if it's a terminal, otherwise nil
+	fd  int      // tty's file descriptor, or -1
 }
 
 func newPrompter(stdin io.Reader, out io.Writer) *prompter {
-	fd := -1
+	p := &prompter{in: bufio.NewScanner(stdin), out: out, fd: -1}
 	// A type assertion: is this io.Reader really an *os.File underneath?
 	if f, ok := stdin.(*os.File); ok && term.IsTerminal(int(f.Fd())) {
-		fd = int(f.Fd())
+		p.tty, p.fd = f, int(f.Fd())
 	}
-	return &prompter{in: bufio.NewScanner(stdin), out: out, fd: fd}
+	return p
 }
 
 // errNoInput means stdin ended before an answer was given.

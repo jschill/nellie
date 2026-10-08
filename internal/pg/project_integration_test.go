@@ -142,7 +142,7 @@ func TestAddUser(t *testing.T) {
 	owner := connectAs(t, cfg, p.Name, ownerPassword, p.Name)
 	mustExec(t, owner, "CREATE TABLE before (id serial PRIMARY KEY, body text)")
 
-	u, err := NewUser(p.Name+DefaultUserSuffix, p.Name)
+	u, err := NewUser(AppUser, p.Name+"_app", p.Name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +181,7 @@ func TestAddUser(t *testing.T) {
 	})
 
 	t.Run("unknown project", func(t *testing.T) {
-		missing, err := NewUser("nobody_app", "nellie_it_does_not_exist")
+		missing, err := NewUser(AppUser, "nellie_it_does_not_exist_app", "nellie_it_does_not_exist")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -201,7 +201,7 @@ func TestAddUserCleansUpAfterFailure(t *testing.T) {
 	owner := connectAs(t, cfg, p.Name, ownerPassword, p.Name)
 	mustExec(t, owner, "DROP SCHEMA public")
 
-	u, err := NewUser(p.Name+DefaultUserSuffix, p.Name)
+	u, err := NewUser(AppUser, p.Name+"_app", p.Name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,4 +226,56 @@ func TestAddUserCleansUpAfterFailure(t *testing.T) {
 	if exists {
 		t.Errorf("role %s still exists after a failed AddUser", u.Name)
 	}
+}
+
+func TestAddAdminUser(t *testing.T) {
+	ctx := context.Background()
+	cfg := adminConfig(t)
+	p, _, dropUsers := newTestProject(t, cfg)
+
+	app, err := NewUser(AppUser, p.Name+"_app", p.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin, err := NewUser(AdminUser, p.Name+"_admin", p.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	*dropUsers = append(*dropUsers, app.Name, admin.Name)
+	appPassword, adminPassword := NewPassword(), NewPassword()
+	for _, u := range []struct {
+		user     User
+		password string
+	}{{app, appPassword}, {admin, adminPassword}} {
+		if err := AddUser(ctx, cfg, u.user, u.password); err != nil {
+			t.Fatalf("adding %s: %v", u.user.Name, err)
+		}
+	}
+
+	conn := connectAs(t, cfg, admin.Name, adminPassword, p.Name)
+	var current, session string
+	if err := conn.QueryRow(ctx, "SELECT current_user, session_user").Scan(&current, &session); err != nil {
+		t.Fatal(err)
+	}
+	if current != p.Name || session != admin.Name {
+		t.Errorf("current_user = %s, session_user = %s; want %s acting as %s", current, session, admin.Name, p.Name)
+	}
+
+	// What the admin user creates belongs to the owner...
+	mustExec(t, conn, "CREATE TABLE made_by_admin (id serial PRIMARY KEY, body text)")
+	var tableOwner string
+	if err := conn.QueryRow(ctx, "SELECT tableowner FROM pg_tables WHERE tablename = 'made_by_admin'").Scan(&tableOwner); err != nil {
+		t.Fatal(err)
+	}
+	if tableOwner != p.Name {
+		t.Errorf("table owner = %s, want %s", tableOwner, p.Name)
+	}
+	mustExec(t, conn, "ALTER TABLE made_by_admin ADD COLUMN extra text")
+
+	// ...so the app user, added before the table existed, can use it.
+	appConn := connectAs(t, cfg, app.Name, appPassword, p.Name)
+	mustExec(t, appConn, "INSERT INTO made_by_admin (body) VALUES ('trumpety-trump')")
+	wantDenied(t, appConn, "DROP TABLE made_by_admin")
+
+	mustExec(t, conn, "DROP TABLE made_by_admin")
 }

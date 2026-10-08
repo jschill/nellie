@@ -39,20 +39,40 @@ func TestValidateProjectName(t *testing.T) {
 	}
 }
 
-func TestDefaultUserNameFits(t *testing.T) {
+func TestDefaultUserNamesFit(t *testing.T) {
 	project := strings.Repeat("a", MaxProjectNameLen)
-	if err := ValidateUserName(project + DefaultUserSuffix); err != nil {
-		t.Errorf("default user name for the longest project name: %v", err)
+	for _, kind := range []UserKind{AppUser, AdminUser} {
+		name := project + "_" + kind.DefaultSuffix()
+		if err := ValidateUserName(name, project); err != nil {
+			t.Errorf("default name for the longest project name: %v", err)
+		}
 	}
 }
 
 func TestValidateUserName(t *testing.T) {
-	if err := ValidateUserName(strings.Repeat("a", maxIdentifierLen)); err != nil {
-		t.Errorf("63-character user name: %v", err)
+	tests := []struct {
+		name  string
+		valid bool
+	}{
+		{"iba_app", true},
+		{"iba_x", true},
+		{"iba__x", true},
+		{"iba_" + strings.Repeat("a", MaxNameLen-len("iba_")), true},
+
+		{"iba_", false},     // nothing after the prefix
+		{"iba", false},      // no prefix
+		{"shop_app", false}, // another project's prefix
+		{"ibaapp", false},
+		{"iba_App", false},
+		{"iba_" + strings.Repeat("a", MaxNameLen-len("iba_")+1), false},
 	}
-	for _, bad := range []string{"", strings.Repeat("a", maxIdentifierLen+1), "Bob", "pg_bob"} {
-		if ValidateUserName(bad) == nil {
-			t.Errorf("ValidateUserName(%q) = nil, want an error", bad)
+	for _, tt := range tests {
+		err := ValidateUserName(tt.name, "iba")
+		if tt.valid && err != nil {
+			t.Errorf("ValidateUserName(%q) = %v, want nil", tt.name, err)
+		}
+		if !tt.valid && err == nil {
+			t.Errorf("ValidateUserName(%q) = nil, want an error", tt.name)
 		}
 	}
 }

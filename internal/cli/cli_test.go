@@ -77,15 +77,15 @@ func TestConnConfigDoesNotPromptWhenConfigured(t *testing.T) {
 	}
 }
 
-func TestAddUserDryRunDefaultName(t *testing.T) {
+func TestAddUserDryRunDefaults(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	// Empty user name: take the suggested default.
-	code := Run([]string{"add-user", "--dry-run"}, strings.NewReader("iba\n\n"), &stdout, &stderr)
+	// Project, then Enter for the default type and the default name.
+	code := Run([]string{"add-user", "--dry-run"}, strings.NewReader("iba\n\n\n"), &stdout, &stderr)
 	if code != exitOK {
 		t.Fatalf("exit code %d, stderr:\n%s", code, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "User name [iba_app]: ") {
-		t.Errorf("default not offered, stderr:\n%s", stderr.String())
+	if !strings.Contains(stderr.String(), "User name: iba_ [app]: ") {
+		t.Errorf("default name not offered, stderr:\n%s", stderr.String())
 	}
 	for _, want := range []string{
 		`CREATE ROLE "iba_app" LOGIN`,
@@ -99,13 +99,29 @@ func TestAddUserDryRunDefaultName(t *testing.T) {
 	}
 }
 
-func TestAddUserDryRunCustomName(t *testing.T) {
+func TestAddUserDryRunAdmin(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	code := Run([]string{"add-user", "--dry-run"}, strings.NewReader("iba\nBad\nreporting\n"), &stdout, &stderr)
+	// An unknown type and a bad name are asked again.
+	input := "iba\nroot\nadmin\nOps!\nops\n"
+	code := Run([]string{"add-user", "--dry-run"}, strings.NewReader(input), &stdout, &stderr)
 	if code != exitOK {
 		t.Fatalf("exit code %d, stderr:\n%s", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), `CREATE ROLE "reporting" LOGIN`) {
-		t.Errorf("unexpected dry-run output:\n%s", stdout.String())
+	for _, want := range []string{"answer one of: app, admin", `'O' isn't allowed`} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr lacks %q:\n%s", want, stderr.String())
+		}
+	}
+	for _, want := range []string{
+		`CREATE ROLE "iba_ops" LOGIN`,
+		`GRANT "iba" TO "iba_ops"`,
+		`ALTER ROLE "iba_ops" IN DATABASE "iba" SET role TO 'iba'`,
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Errorf("dry-run output lacks %q:\n%s", want, stdout.String())
+		}
+	}
+	if strings.Contains(stdout.String(), "connect") {
+		t.Errorf("admin users need no schema grants:\n%s", stdout.String())
 	}
 }
