@@ -39,14 +39,20 @@ func TestValidateProjectName(t *testing.T) {
 	}
 }
 
-func TestNewProjectRoleNamesFit(t *testing.T) {
-	p, err := NewProject(strings.Repeat("a", MaxProjectNameLen))
-	if err != nil {
-		t.Fatal(err)
+func TestDefaultUserNameFits(t *testing.T) {
+	project := strings.Repeat("a", MaxProjectNameLen)
+	if err := ValidateUserName(project + DefaultUserSuffix); err != nil {
+		t.Errorf("default user name for the longest project name: %v", err)
 	}
-	for _, role := range []string{p.Owner, p.App} {
-		if len(role) > maxIdentifierLen {
-			t.Errorf("role %q is %d characters, longer than Postgres allows", role, len(role))
+}
+
+func TestValidateUserName(t *testing.T) {
+	if err := ValidateUserName(strings.Repeat("a", maxIdentifierLen)); err != nil {
+		t.Errorf("63-character user name: %v", err)
+	}
+	for _, bad := range []string{"", strings.Repeat("a", maxIdentifierLen+1), "Bob", "pg_bob"} {
+		if ValidateUserName(bad) == nil {
+			t.Errorf("ValidateUserName(%q) = nil, want an error", bad)
 		}
 	}
 }

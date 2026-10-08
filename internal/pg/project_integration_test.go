@@ -43,27 +43,61 @@ func connectAs(t *testing.T, admin *pgx.ConnConfig, user, password, db string) *
 	return conn
 }
 
-func TestCreateProject(t *testing.T) {
-	ctx := context.Background()
-	cfg := adminConfig(t)
-
+// newTestProject creates a project with a random name and drops it, and any
+// users named in dropUsers, when the test ends.
+func newTestProject(t *testing.T, cfg *pgx.ConnConfig) (p Project, password string, dropUsers *[]string) {
+	t.Helper()
 	p, err := NewProject("nellie_it_" + strings.ToLower(rand.Text()[:8]))
 	if err != nil {
 		t.Fatal(err)
 	}
-	ownerPassword, appPassword := NewPassword(), NewPassword()
-
-	if err := CreateProject(ctx, cfg, p, ownerPassword, appPassword); err != nil {
+	password = NewPassword()
+	if err := CreateProject(context.Background(), cfg, p, password); err != nil {
 		t.Fatal(err)
 	}
+	users := new([]string)
 	t.Cleanup(func() {
-		if err := dropProject(context.Background(), cfg, p); err != nil {
+		ctx := context.Background()
+		if err := dropProject(ctx, cfg, p); err != nil {
 			t.Errorf("dropping test project: %v", err)
 		}
+		conn, err := pgx.ConnectConfig(ctx, cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Close(ctx)
+		for _, u := range *users {
+			if _, err := conn.Exec(ctx, "DROP ROLE IF EXISTS "+ident(u)); err != nil {
+				t.Errorf("dropping test user %s: %v", u, err)
+			}
+		}
 	})
+	return p, password, users
+}
+
+func mustExec(t *testing.T, conn *pgx.Conn, sql string) {
+	t.Helper()
+	if _, err := conn.Exec(context.Background(), sql); err != nil {
+		t.Fatalf("%s: %v", sql, err)
+	}
+}
+
+func wantDenied(t *testing.T, conn *pgx.Conn, sql string) {
+	t.Helper()
+	_, err := conn.Exec(context.Background(), sql)
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != "42501" { // insufficient_privilege
+		t.Errorf("%q should be denied, got %v", sql, err)
+	}
+}
+
+func TestCreateProject(t *testing.T) {
+	ctx := context.Background()
+	cfg := adminConfig(t)
+	p, password, _ := newTestProject(t, cfg)
 
 	t.Run("second create fails", func(t *testing.T) {
-		err := CreateProject(ctx, cfg, p, NewPassword(), NewPassword())
+		err := CreateProject(ctx, cfg, p, NewPassword())
 		if !errors.Is(err, ErrExists) {
 			t.Errorf("got %v, want ErrExists", err)
 		}
@@ -84,34 +118,112 @@ func TestCreateProject(t *testing.T) {
 		}
 	})
 
-	// The owner creates the schema, as a migration would. Everything after
-	// that depends on it, so these steps aren't subtests.
-	owner := connectAs(t, cfg, p.Owner, ownerPassword, p.Name)
-	if _, err := owner.Exec(ctx, "CREATE TABLE notes (id serial PRIMARY KEY, body text)"); err != nil {
-		t.Fatalf("owner creating a table: %v", err)
+	t.Run("owner can do everything", func(t *testing.T) {
+		owner := connectAs(t, cfg, p.Name, password, p.Name)
+		for _, sql := range []string{
+			"CREATE TABLE notes (id serial PRIMARY KEY, body text)",
+			"INSERT INTO notes (body) VALUES ('trumpety-trump')",
+			"ALTER TABLE notes ADD COLUMN extra text",
+			"TRUNCATE notes",
+			"DROP TABLE notes",
+			"CREATE SCHEMA extra",
+		} {
+			mustExec(t, owner, sql)
+		}
+	})
+}
+
+func TestAddUser(t *testing.T) {
+	ctx := context.Background()
+	cfg := adminConfig(t)
+	p, ownerPassword, dropUsers := newTestProject(t, cfg)
+
+	// One table before the user exists, one after: both must be covered.
+	owner := connectAs(t, cfg, p.Name, ownerPassword, p.Name)
+	mustExec(t, owner, "CREATE TABLE before (id serial PRIMARY KEY, body text)")
+
+	u, err := NewUser(p.Name+DefaultUserSuffix, p.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	*dropUsers = append(*dropUsers, u.Name)
+	appPassword := NewPassword()
+	if err := AddUser(ctx, cfg, u, appPassword); err != nil {
+		t.Fatal(err)
 	}
 
-	app := connectAs(t, cfg, p.App, appPassword, p.Name)
-	for _, sql := range []string{
-		"INSERT INTO notes (body) VALUES ('trumpety-trump')",
-		"SELECT * FROM notes",
-		"UPDATE notes SET body = 'trump'",
-		"DELETE FROM notes",
-	} {
-		if _, err := app.Exec(ctx, sql); err != nil {
-			t.Errorf("app should be allowed %q: %v", sql, err)
+	mustExec(t, owner, "CREATE TABLE after (id serial PRIMARY KEY, body text)")
+
+	app := connectAs(t, cfg, u.Name, appPassword, p.Name)
+	for _, table := range []string{"before", "after"} {
+		for _, sql := range []string{
+			"INSERT INTO " + table + " (body) VALUES ('trumpety-trump')", // also uses the sequence
+			"SELECT * FROM " + table,
+			"UPDATE " + table + " SET body = 'trump'",
+			"DELETE FROM " + table,
+		} {
+			mustExec(t, app, sql)
 		}
 	}
 	for _, sql := range []string{
 		"CREATE TABLE more_notes (id int)",
-		"DROP TABLE notes",
-		"ALTER TABLE notes ADD COLUMN extra text",
-		"TRUNCATE notes",
+		"DROP TABLE after",
+		"ALTER TABLE before ADD COLUMN extra text",
+		"TRUNCATE before",
 	} {
-		_, err := app.Exec(ctx, sql)
-		var pgErr *pgconn.PgError
-		if !errors.As(err, &pgErr) || pgErr.Code != "42501" { // insufficient_privilege
-			t.Errorf("app should be denied %q, got %v", sql, err)
+		wantDenied(t, app, sql)
+	}
+
+	t.Run("second add fails", func(t *testing.T) {
+		if err := AddUser(ctx, cfg, u, NewPassword()); !errors.Is(err, ErrExists) {
+			t.Errorf("got %v, want ErrExists", err)
 		}
+	})
+
+	t.Run("unknown project", func(t *testing.T) {
+		missing, err := NewUser("nobody_app", "nellie_it_does_not_exist")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := AddUser(ctx, cfg, missing, NewPassword()); !errors.Is(err, ErrNotFound) {
+			t.Errorf("got %v, want ErrNotFound", err)
+		}
+	})
+}
+
+func TestAddUserCleansUpAfterFailure(t *testing.T) {
+	ctx := context.Background()
+	cfg := adminConfig(t)
+	p, ownerPassword, dropUsers := newTestProject(t, cfg)
+
+	// Without a public schema the schema grants fail, after the role and its
+	// CONNECT grant already exist.
+	owner := connectAs(t, cfg, p.Name, ownerPassword, p.Name)
+	mustExec(t, owner, "DROP SCHEMA public")
+
+	u, err := NewUser(p.Name+DefaultUserSuffix, p.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	*dropUsers = append(*dropUsers, u.Name) // in case cleanup doesn't work
+	err = AddUser(ctx, cfg, u, NewPassword())
+	if err == nil {
+		t.Fatal("AddUser succeeded without a public schema")
+	}
+	if strings.Contains(err.Error(), "cleanup failed") {
+		t.Fatalf("cleanup failed: %v", err)
+	}
+
+	admin, err := pgx.ConnectConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Close(ctx)
+	var exists bool
+	if err := admin.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $1)", u.Name).Scan(&exists); err != nil {
+		t.Fatal(err)
+	}
+	if exists {
+		t.Errorf("role %s still exists after a failed AddUser", u.Name)
 	}
 }

@@ -51,7 +51,7 @@ Short, lowercase, verb-noun subcommands:
 
 ```
 nellie add-project     # asks for the name (done)
-nellie add-user <user> --project <name>
+nellie add-user        # asks for project and user name (done)
 nellie rotate-password <user>
 nellie list            # alias: nellie trumpet
 ```
@@ -91,21 +91,29 @@ Run all of these before calling a change done.
 
 ## Data model
 
-A **project is a database with two roles**, all derived from one name:
+Like Supabase: a project starts with **one role that can do everything**, and
+more restricted users are added separately.
 
-- `<name>` — the database, owned by `<name>_owner`. `CONNECT` is revoked from
-  `PUBLIC` and granted only to the two roles.
-- `<name>_owner` — `LOGIN`; owns the database and the public schema, runs
-  migrations. Default privileges give `_app` access to everything it creates,
-  so migrations **must** run as this role or `_app` gets no access.
-- `<name>_app` — `LOGIN`; `SELECT, INSERT, UPDATE, DELETE` on tables and
-  `USAGE, SELECT` on sequences. No DDL, no `TRUNCATE`.
-- The admin role grants itself membership in `<name>_owner`: on Postgres 16+
-  `CREATEROLE` no longer implies it, and `CREATE DATABASE ... OWNER` and
+- `add-project <name>` creates:
+  - the database `<name>`, owned by the role `<name>`. `CONNECT` is revoked
+    from `PUBLIC` and granted to the owner.
+  - the role `<name>` (`LOGIN`): owns the database and its public schema, so
+    it can do everything, including running migrations.
+- `add-user` creates a `LOGIN` role (default name `<project>_app`) in an
+  existing project with `SELECT, INSERT, UPDATE, DELETE` on tables and
+  `USAGE, SELECT` on sequences. No DDL, no `TRUNCATE`. It covers tables that
+  exist now (`GRANT ... ON ALL TABLES`) and ones the database owner creates
+  later (`ALTER DEFAULT PRIVILEGES FOR ROLE <owner>`), so migrations **must**
+  run as the owner or new tables are invisible to the user. The owner is
+  looked up in `pg_database`, so it also works for databases nellie didn't
+  create, as long as the admin is a member of their owner.
+- The admin role grants itself membership in each project owner and keeps it:
+  on Postgres 16+ `CREATEROLE` no longer implies it, and
+  `CREATE DATABASE ... OWNER`, `GRANT ... ON ALL TABLES` and
   `ALTER DEFAULT PRIVILEGES FOR ROLE` need it.
-- Project names: `^[a-z][a-z0-9_]*$`, max 57 chars (63 minus `_owner`), no
-  `pg_` prefix. That keeps the database and both role names valid unquoted
-  identifiers.
+- Names: `^[a-z][a-z0-9_]*$`, no `pg_` prefix, so they're valid unquoted
+  identifiers. Users max 63 chars; projects max 59, so the default
+  `<project>_app` still fits.
 
 ## Safety rules
 

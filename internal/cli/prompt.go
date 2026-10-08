@@ -58,3 +58,30 @@ func (p *prompter) secret(label string) (string, error) {
 	}
 	return strings.TrimSpace(string(b)), nil
 }
+
+// ask prompts until validate accepts the answer. An empty answer means def,
+// if def isn't empty. what names the answer in errors ("project name").
+func (p *prompter) ask(label, what, def string, validate func(string) error) (string, error) {
+	if def != "" {
+		label = fmt.Sprintf("%s [%s]: ", label, def)
+	} else {
+		label += ": "
+	}
+	for {
+		answer, err := p.line(label)
+		if errors.Is(err, errNoInput) {
+			return "", fmt.Errorf("no %s given", what)
+		}
+		if err != nil {
+			return "", fmt.Errorf("reading %s: %w", what, err)
+		}
+		if answer == "" {
+			answer = def
+		}
+		err = validate(answer)
+		if err == nil {
+			return answer, nil
+		}
+		fmt.Fprintln(p.out, err)
+	}
+}

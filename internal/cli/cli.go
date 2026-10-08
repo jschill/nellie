@@ -3,9 +3,15 @@
 package cli
 
 import (
+	"errors"
+	"flag"
 	"fmt"
 	"io"
+	"net"
+	"net/url"
 	"os"
+	"strconv"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -22,7 +28,8 @@ const usage = `nellie: packed her trunk and said goodbye to the circus
 Usage: nellie <command> [flags]
 
 Commands:
-  add-project   create a database with an owner role and an app role
+  add-project   create a database and a role with the same name that owns it
+  add-user      add a user that can read and write rows in a project
 
 Run "nellie <command> -h" for a command's flags.
 `
@@ -42,6 +49,8 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	switch args[0] {
 	case "add-project":
 		return addProject(args[1:], stdin, stdout, stderr)
+	case "add-user":
+		return addUser(args[1:], stdin, stdout, stderr)
 	case "help", "-h", "-help", "--help":
 		fmt.Fprint(stdout, usage)
 		return exitOK
@@ -91,4 +100,58 @@ func hasPGEnv() bool {
 		}
 	}
 	return false
+}
+
+// options are the flags every command takes.
+type options struct {
+	dsn    string
+	dryRun bool
+}
+
+// parseFlags parses a command's flags. If ok is false, the command should
+// return code straight away (after -h, or a usage error fs already reported).
+func parseFlags(name, help string, args []string, stderr io.Writer) (opts options, code int, ok bool) {
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	fs.StringVar(&opts.dsn, "dsn", "", "admin connection string (default: $DATABASE_URL, then the PG* environment variables, then ask)")
+	fs.BoolVar(&opts.dryRun, "dry-run", false, "print the SQL instead of running it")
+	fs.Usage = func() {
+		fmt.Fprintf(stderr, "Usage: nellie %s [flags]\n\n%s\nFlags:\n", name, help)
+		fs.PrintDefaults()
+	}
+
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return opts, exitOK, false
+		}
+		return opts, exitUsage, false
+	}
+	if fs.NArg() > 0 {
+		fmt.Fprintf(stderr, "nellie: %s takes no arguments; it asks for what it needs\n", name)
+		return opts, exitUsage, false
+	}
+	return opts, 0, true
+}
+
+// fail reports err and returns the exit code for a runtime error.
+func fail(stderr io.Writer, err error) int {
+	fmt.Fprintf(stderr, "nellie: %v\n", err)
+	return exitError
+}
+
+// connURL builds a connection string for a project role on the same server
+// as the admin connection.
+func connURL(cfg *pgx.ConnConfig, user, password, db string) string {
+	u := url.URL{
+		Scheme: "postgres",
+		User:   url.UserPassword(user, password),
+		Path:   "/" + db,
+	}
+	if strings.HasPrefix(cfg.Host, "/") {
+		// A Unix socket directory can't go in the host part of a URL.
+		u.RawQuery = url.Values{"host": {cfg.Host}}.Encode()
+	} else {
+		u.Host = net.JoinHostPort(cfg.Host, strconv.Itoa(int(cfg.Port)))
+	}
+	return u.String()
 }
