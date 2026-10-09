@@ -3,6 +3,39 @@
 All notable changes to nellie are listed here, newest first. The version lives
 in `VERSION`; releases are tagged `vMAJOR.MINOR.PATCH`.
 
+## [0.2.0.0] - 2026-10-09
+
+*New trunk, same elephant: Nellie can now change the lock on the circus door
+without packing anyone off.*
+
+### Added
+
+- `nellie rotate-password [<user>]`: give a user, or a project owner, a new
+  password. Press Enter and nellie generates one and shows it once in a
+  connection URL. Or type your own: it's asked twice, hidden, and never
+  printed back. The old password stops working at once; sessions already
+  connected stay connected.
+- Pipe a password in from a secrets manager:
+  `op read op://vault/shop-app/password | nellie rotate-password shop_app`.
+  Piped input is only ever the password, on one non-empty line. Give the user
+  as the argument and the admin connection in `DATABASE_URL`, `.env` or `PG*`,
+  or nellie stops with a usage error instead of reading your password as
+  something else.
+- `--generate` makes a password without asking, for scripts and CI.
+- `--json` prints `user`, plus `database` and `url` when nellie finds the
+  project database, plus `password` only when nellie generated it.
+- `--dry-run` prints the `ALTER ROLE` with the password as `<redacted>`.
+  Flags can go before or after the user name.
+- nellie won't rotate roles that can't log in, superusers, the admin it's
+  connected as, or roles with powers nellie never hands out (`CREATEROLE`,
+  `REPLICATION`, `BYPASSRLS`, directly or through membership, or any
+  predefined `pg_*` role). Those are a job for `psql`'s `\password`.
+- If a role's `VALID UNTIL` has already passed, nellie still sets the password
+  but warns you, with the statement that clears it.
+- If the result can't be written (a full disk, a closed pipe), nellie says the
+  password changed but couldn't be shown, and exits 1, instead of losing a
+  generated password without a word.
+
 ## [0.1.0.0] - 2026-10-09
 
 *Nellie packed her trunk and said goodbye to the circus. Off she went with a

@@ -36,8 +36,9 @@ const usage = `nellie: packed her trunk and said goodbye to the circus
 Usage: nellie <command> [flags]
 
 Commands:
-  add-project   create a database and a role with the same name that owns it
-  add-user      add a user to a project: application (reads and writes) or admin
+  add-project       create a database and a role with the same name that owns it
+  add-user          add a user to a project: application (reads and writes) or admin
+  rotate-password   give a user a new password
 
 Run "nellie <command> -h" for a command's flags.
 Run "nellie --version" for the version.
@@ -92,6 +93,8 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return addProject(args[1:], stdin, stdout, stderr)
 	case "add-user":
 		return addUser(args[1:], stdin, stdout, stderr)
+	case "rotate-password":
+		return rotatePassword(args[1:], stdin, stdout, stderr)
 	case "help", "-h", "-help", "--help":
 		fmt.Fprint(stdout, usage)
 		return exitOK
@@ -119,7 +122,7 @@ func connConfig(p *prompter) (*pgx.ConnConfig, error) {
 		if err != nil {
 			return nil, fmt.Errorf("reading connection URL: %w", err)
 		}
-		cfg, err := parseAdmin(dsn)
+		cfg, err := parseAdmin(strings.TrimSpace(dsn))
 		if err == nil {
 			return cfg, nil
 		}
@@ -206,31 +209,76 @@ func hasPGEnv() bool {
 	return false
 }
 
-// options are the flags every command takes.
+// command describes a subcommand's command line, for parseFlags.
+type command struct {
+	name string
+	help string
+	arg  string // the optional argument in the usage line, like "<user>"; "" for none
+	json bool   // whether it has --json
+	gen  bool   // whether it has --generate
+}
+
+// options are the parsed flags, plus the optional argument.
 type options struct {
 	dryRun bool
+	json   bool
+	gen    bool
+	arg    string // "" if not given
 }
 
 // parseFlags parses a command's flags. If ok is false, the command should
 // return code straight away (after -h, or a usage error fs already reported).
-func parseFlags(name, help string, args []string, stderr io.Writer) (opts options, code int, ok bool) {
-	fs := flag.NewFlagSet(name, flag.ContinueOnError)
+func parseFlags(cmd command, args []string, stderr io.Writer) (opts options, code int, ok bool) {
+	fs := flag.NewFlagSet(cmd.name, flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	fs.BoolVar(&opts.dryRun, "dry-run", false, "print the SQL instead of running it")
+	if cmd.json {
+		fs.BoolVar(&opts.json, "json", false, "print the result as JSON")
+	}
+	if cmd.gen {
+		fs.BoolVar(&opts.gen, "generate", false, "generate the new password instead of asking for one")
+	}
+	usageLine := "nellie " + cmd.name + " [flags]"
+	if cmd.arg != "" {
+		usageLine += " [" + cmd.arg + "]"
+	}
 	fs.Usage = func() {
-		fmt.Fprintf(stderr, "Usage: nellie %s [flags]\n\n%s\nFlags:\n", name, help)
+		fmt.Fprintf(stderr, "Usage: %s\n\n%s\nFlags:\n", usageLine, cmd.help)
 		fs.PrintDefaults()
 	}
 
-	if err := fs.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return opts, exitOK, false
+	// fs.Parse stops at the first argument that isn't a flag, so in
+	// "rotate-password shop_app --json" it would leave --json unparsed. Parse
+	// again after each argument, until the rest is used up or follows "--".
+	var positional []string
+	for {
+		if err := fs.Parse(args); err != nil {
+			if errors.Is(err, flag.ErrHelp) {
+				return opts, exitOK, false
+			}
+			return opts, exitUsage, false
 		}
-		return opts, exitUsage, false
+		rest := fs.Args()
+		if len(rest) == 0 {
+			break
+		}
+		if parsed := len(args) - len(rest); parsed > 0 && args[parsed-1] == "--" {
+			positional = append(positional, rest...)
+			break
+		}
+		positional = append(positional, rest[0])
+		args = rest[1:]
 	}
-	if fs.NArg() > 0 {
-		fmt.Fprintf(stderr, "nellie: %s takes no arguments; it asks for what it needs\n", name)
+
+	switch {
+	case len(positional) > 0 && cmd.arg == "":
+		fmt.Fprintf(stderr, "nellie: %s takes no arguments; it asks for what it needs\n", cmd.name)
 		return opts, exitUsage, false
+	case len(positional) > 1:
+		fmt.Fprintf(stderr, "nellie: too many arguments\nUsage: %s\n", usageLine)
+		return opts, exitUsage, false
+	case len(positional) == 1:
+		opts.arg = positional[0]
 	}
 	return opts, exitOK, true
 }
@@ -254,12 +302,16 @@ func fail(stderr io.Writer, err error) int {
 
 // connURL builds a connection string for a project role on the same server
 // as the admin connection. It repeats the admin's sslmode, so the app never
-// connects with weaker TLS. Unix sockets have no sslmode.
+// connects with weaker TLS. Unix sockets have no sslmode. An empty password
+// leaves it out of the URL.
 func connURL(cfg *pgx.ConnConfig, user, password, db string) string {
 	u := url.URL{
 		Scheme: "postgres",
-		User:   url.UserPassword(user, password),
+		User:   url.User(user),
 		Path:   "/" + db,
+	}
+	if password != "" {
+		u.User = url.UserPassword(user, password)
 	}
 	query := url.Values{}
 	if allUnixSockets(cfg) {

@@ -39,6 +39,12 @@ var errNoInput = errors.New("no input")
 
 // line prints label and returns the next line of input, trimmed.
 func (p *prompter) line(label string) (string, error) {
+	answer, err := p.rawLine(label)
+	return strings.TrimSpace(answer), err
+}
+
+// rawLine is like line, but keeps spaces at either end.
+func (p *prompter) rawLine(label string) (string, error) {
 	fmt.Fprint(p.out, label)
 	if !p.in.Scan() {
 		fmt.Fprintln(p.out)
@@ -47,13 +53,14 @@ func (p *prompter) line(label string) (string, error) {
 		}
 		return "", errNoInput
 	}
-	return strings.TrimSpace(p.in.Text()), nil
+	return p.in.Text(), nil
 }
 
-// secret is like line, but doesn't echo what's typed when stdin is a terminal.
+// secret is like rawLine, but doesn't echo what's typed when stdin is a
+// terminal. It doesn't trim either: spaces can be part of a password.
 func (p *prompter) secret(label string) (string, error) {
 	if p.fd < 0 {
-		return p.line(label)
+		return p.rawLine(label)
 	}
 	old, err := term.GetState(p.fd)
 	if err != nil {
@@ -80,10 +87,13 @@ func (p *prompter) secret(label string) (string, error) {
 	fmt.Fprint(p.out, label)
 	b, err := term.ReadPassword(p.fd)
 	fmt.Fprintln(p.out) // the Enter key wasn't echoed either
+	if errors.Is(err, io.EOF) {
+		return "", errNoInput // Ctrl-D: the same as the end of piped input
+	}
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimSpace(string(b)), nil
+	return string(b), nil
 }
 
 // ask prompts until validate accepts the answer. An empty answer means def,

@@ -26,7 +26,8 @@ do everything**, and you add more restricted users when you need them.
 | `nellie add-user` → Application | `shop_app`, which can read and write rows but can't touch the schema. For your app. |
 | `nellie add-user` → Admin | `shop_admin`, which can do everything the owner can. For people and migrations. |
 
-Everything is asked for interactively, so there are no flags to look up.
+`add-project` and `add-user` ask for everything interactively, so there are no
+flags to look up; `rotate-password` asks for whatever you don't give it.
 Names are checked as you type, and a bad one never gets anywhere near the
 server.
 
@@ -164,13 +165,59 @@ User name: shop_app
 `add-user` also works on databases nellie didn't create, as long as the
 admin role is a member of the database's owner.
 
-### Flags
+### `nellie rotate-password [<user>]`
 
-Both commands take the same flag:
+Gives a user, or a project owner, a new password. Asks for the user if you
+don't name it, then for the new password:
+
+```
+New password (input hidden; empty generates one):
+```
+
+Press Enter (or pass `--generate`) and nellie generates one and prints it
+once, in a connection URL (or on its own line if nellie can't tell which
+project database the role belongs to).
+Or type your own: it's asked twice, and never printed back. Typed passwords
+are limited to printable ASCII (see [Passwords](#passwords)).
+
+Got the password in a secrets manager? Pipe it in, one line, no confirmation:
+
+```bash
+op read op://vault/shop-app/password | nellie rotate-password shop_app
+```
+
+Piped input is only ever the password, on a single line, read until the input
+ends (so close it, or press Ctrl-D if you're typing into a non-terminal like
+`docker exec -i`): name the user as the argument, and
+put the admin connection in `DATABASE_URL` (or `.env`, or the `PG*`
+variables). Otherwise nellie stops with a usage error rather than reading
+the password as something else. An empty pipe, or an empty line, is an error
+rather than "generate one", because it usually means the command feeding it
+failed (say, `echo "$PW"` with `PW` unset). In scripts, use `--generate`.
+
+The old password stops working at once; sessions that are already connected
+stay connected. Postgres has one password per role, so there's no overlap
+window: update the app's config right after.
+
+nellie won't touch roles that can't log in, superusers, the admin role it's
+connected as, or roles with powers nellie never gives its own roles
+(`CREATEROLE`, `REPLICATION`, `BYPASSRLS`, such as another admin), directly
+or through membership in another role, and members of any predefined `pg_*`
+role (other than `pg_database_owner`). Use `psql`'s `\password` for those.
+On Postgres 16 and later the admin also needs `ADMIN OPTION` on the role,
+which it has for every role it created; on Postgres 15 `CREATEROLE` is enough. If the role's `VALID UNTIL` has already
+passed, nellie still sets the password but warns you, since the role can't
+log in until that's cleared.
+
+### Flags
 
 | Flag | |
 | --- | --- |
-| `--dry-run` | Print the SQL instead of running it. Doesn't connect. Passwords show as `<redacted>`. |
+| `--dry-run` | Print the SQL instead of running it. Doesn't connect. Passwords show as `<redacted>`. All commands. |
+| `--generate` | Generate the new password without asking. `rotate-password` only. |
+| `--json` | Print the result as JSON: `user`; `database` and `url` when the project database is found; `password` only if nellie generated it. `rotate-password` only, and not together with `--dry-run`. |
+
+Flags can go before or after the user name.
 
 Add `-h` to any command for its help text.
 
@@ -179,9 +226,13 @@ Add `-h` to any command for its help text.
 An elephant never forgets. Nellie does, on purpose:
 
 - Passwords are generated for you: 26 random characters (130 bits) from
-  Go's `crypto/rand`.
-- They're printed once, as part of a ready-to-use connection URL, and stored
-  nowhere.
+  Go's `crypto/rand`. (`rotate-password` also lets you type or pipe in your
+  own.)
+- Generated ones are printed once, as part of a ready-to-use connection URL,
+  and stored nowhere. Ones you typed are never printed.
+- Typed passwords must be printable ASCII. Postgres normalizes other
+  characters (SASLprep) before hashing, nellie doesn't, so a password like
+  `smörgåsbord` could end up never working.
 - They're hashed on your machine before being sent (SCRAM-SHA-256, the same
   trick as `psql`'s `\password`), so the plaintext never reaches the server
   or its logs.
@@ -198,7 +249,6 @@ can't finish; the exit code is still 130.
 
 ## Not yet
 
-- `nellie rotate-password`, for a new password without a new user
 - `nellie list`, also known as `nellie trumpet`
 
 ## Development

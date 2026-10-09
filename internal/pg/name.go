@@ -46,6 +46,13 @@ func ValidateUserName(name, project string) error {
 	return nil
 }
 
+// ValidateRoleName reports whether name follows nellie's naming rules for any
+// role: a project owner or one of its users. Unlike ValidateUserName it
+// doesn't need to know the project.
+func ValidateRoleName(name string) error {
+	return validateName("role", name, MaxNameLen)
+}
+
 // IsNameChar reports whether c may appear in a name after its first character.
 func IsNameChar(c byte) bool {
 	return c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '_'

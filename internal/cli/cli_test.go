@@ -41,8 +41,9 @@ func TestConnConfigPrompts(t *testing.T) {
 	clearConnEnv(t)
 	// The URL and the project name come from the same stdin, so this also
 	// checks that the first prompt doesn't swallow the second answer.
+	// Value: protects=a pasted URL with spaces around it still parses; fails_when=connConfig stops trimming now that secret keeps spaces for passwords, so pgx refuses the leading space; why_new=regression from secret no longer trimming; seam=none
 	var out bytes.Buffer
-	p := newPrompter(strings.NewReader("not a url ::\npostgres://admin:secret@db.example:6543/postgres\niba\n"), &out)
+	p := newPrompter(strings.NewReader("not a url ::\n  postgres://admin:secret@db.example:6543/postgres  \niba\n"), &out)
 
 	cfg, err := connConfig(p)
 	if err != nil {
@@ -375,6 +376,8 @@ func TestFlagErrorExitCodes(t *testing.T) {
 	}{
 		{[]string{"add-project", "--bogus"}, exitUsage},
 		{[]string{"add-project", "-h"}, exitOK},
+		// Value: protects=--json exists only where output is data; fails_when=parseFlags registers --json for every command, so add-project accepts it and prints human text a script can't parse; why_new=the json flag became per-command; seam=none
+		{[]string{"add-project", "--json"}, exitUsage},
 	}
 	for _, tt := range tests {
 		var stdout, stderr bytes.Buffer
@@ -443,6 +446,7 @@ func TestDryRunIsMarkedNotRunnable(t *testing.T) {
 	}{
 		{"add-project", []string{"add-project", "--dry-run"}, "iba\n"},
 		{"add-user", []string{"add-user", "--dry-run"}, "iba\n\n\n"},
+		{"rotate-password", []string{"rotate-password", "--dry-run", "iba_app"}, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

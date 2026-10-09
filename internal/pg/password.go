@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"errors"
 	"fmt"
 )
 
@@ -21,12 +22,28 @@ func NewPassword() string {
 	return rand.Text()
 }
 
+// ValidatePassword checks a password someone typed. Only printable ASCII is
+// allowed, because scramVerifier skips SASLprep (see there): for anything else
+// the stored verifier could differ from what clients compute at login.
+func ValidatePassword(password string) error {
+	if password == "" {
+		return errors.New("password is empty")
+	}
+	for i := 0; i < len(password); i++ {
+		if c := password[i]; c < ' ' || c > '~' {
+			return errors.New("password may only contain printable ASCII characters (letters, digits, punctuation and spaces)")
+		}
+	}
+	return nil
+}
+
 // scramVerifier hashes password into the SCRAM-SHA-256 format Postgres stores
 // in pg_authid. Sending the verifier instead of the plaintext means the
 // password never shows up in server logs, the same trick psql's \password uses.
 //
-// Postgres runs passwords through SASLprep first; for the ASCII passwords from
-// NewPassword that's a no-op, so it's skipped here.
+// Postgres runs passwords through SASLprep first; for printable ASCII (all
+// that NewPassword makes and ValidatePassword lets through) that's a no-op, so
+// it's skipped here.
 func scramVerifier(password string) (string, error) {
 	salt := make([]byte, scramSaltLen)
 	rand.Read(salt) // never returns an error since Go 1.24

@@ -18,7 +18,7 @@ const addUserHelp = `Asks for a project, a user type and a name, then creates a 
 `
 
 func addUser(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	opts, code, ok := parseFlags("add-user", addUserHelp, args, stderr)
+	opts, code, ok := parseFlags(command{name: "add-user", help: addUserHelp}, args, stderr)
 	if !ok {
 		return code
 	}

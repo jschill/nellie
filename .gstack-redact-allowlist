@@ -1,2 +1,3 @@
 postgres://admin:password@localhost:5432
 postgres://nellie_admin:something-long@localhost:5432
+postgres://admin:secret@db.example:6543

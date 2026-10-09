@@ -77,3 +77,26 @@ func TestValidateUserName(t *testing.T) {
 		}
 	}
 }
+
+// Value: protects=rotate-password accepts any nellie-style role (owner or user, up to 63 chars) and rejects the rest before connecting; fails_when=the length limit or the pg_ rule is dropped, or owners need a <project>_ prefix; why_new=ValidateRoleName had no test of its own; seam=none
+func TestValidateRoleName(t *testing.T) {
+	tests := []struct {
+		name  string
+		valid bool
+	}{
+		{"shop", true},
+		{"shop_v2_app", true},
+		{strings.Repeat("a", MaxNameLen), true},
+
+		{"", false},
+		{strings.Repeat("a", MaxNameLen+1), false},
+		{"pg_monitor", false},
+		{"1shop", false},
+		{"Shop", false},
+	}
+	for _, tt := range tests {
+		if err := ValidateRoleName(tt.name); (err == nil) != tt.valid {
+			t.Errorf("ValidateRoleName(%q) = %v, want valid=%v", tt.name, err, tt.valid)
+		}
+	}
+}

@@ -22,7 +22,7 @@ const minServerVersion = 150000
 var (
 	// ErrExists means a database or role with a name nellie wants exists.
 	ErrExists = errors.New("name already in use")
-	// ErrNotFound means a database nellie was asked to use doesn't exist.
+	// ErrNotFound means a database or role nellie was asked to use doesn't exist.
 	ErrNotFound = errors.New("does not exist")
 	// ErrCleanupFailed means nellie failed and then couldn't undo what it had
 	// created, so a role or database may be left behind.
