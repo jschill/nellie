@@ -39,7 +39,8 @@ deliberately reasonable-sized first project. That shapes how to work here:
   the dispatch by hand is part of the learning.
 - Postgres driver: `github.com/jackc/pgx/v5`. No ORM.
 - Layout:
-  - `main.go` — calls `cli.Run`, nothing else.
+  - `main.go` — embeds `VERSION` (`go:embed`), sets `cli.Version`, calls `cli.Run`.
+- `VERSION` — the release version, `MAJOR.MINOR.PATCH.MICRO` (gstack-ship bumps it). `nellie --version` prints it.
   - `internal/cli/` — dispatch plus one file per subcommand: flags, prompts,
     output, exit codes. (Not `cmd/`: in Go, `cmd/<name>/` holds `main`
     packages.)

@@ -411,3 +411,25 @@ func TestFailExitCodes(t *testing.T) {
 		})
 	}
 }
+
+// Value: protects=--version prints the version on stdout with exit 0, even when .env is broken; fails_when=the flag falls through to "unknown command" or is read after loadDotenv; why_new=no test covered the version flag; seam=none
+func TestVersion(t *testing.T) {
+	old := Version
+	Version = "1.2.3.4"
+	t.Cleanup(func() { Version = old })
+	t.Chdir(t.TempDir())
+	if err := os.WriteFile(".env", []byte("not a valid line\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, arg := range []string{"version", "-version", "--version"} {
+		t.Run(arg, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if code := Run([]string{arg}, strings.NewReader(""), &stdout, &stderr); code != exitOK {
+				t.Fatalf("exit code = %d, want %d; stderr:\n%s", code, exitOK, stderr.String())
+			}
+			if got, want := stdout.String(), "nellie 1.2.3.4\n"; got != want {
+				t.Errorf("stdout = %q, want %q", got, want)
+			}
+		})
+	}
+}

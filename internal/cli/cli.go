@@ -27,6 +27,9 @@ const (
 	exitUsage = 2 // bad flags or arguments
 )
 
+// Version is set by main from the VERSION file.
+var Version = "unknown"
+
 const usage = `nellie: packed her trunk and said goodbye to the circus
 
 Usage: nellie <command> [flags]
@@ -36,6 +39,7 @@ Commands:
   add-user      add a user to a project: application (reads and writes) or admin
 
 Run "nellie <command> -h" for a command's flags.
+Run "nellie --version" for the version.
 `
 
 // Run dispatches args (without the program name) to a subcommand and returns
@@ -45,6 +49,12 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		fmt.Fprint(stderr, usage)
 		return exitUsage
+	}
+	// Before .env is read, so a broken .env can't block it.
+	switch args[0] {
+	case "version", "-version", "--version":
+		fmt.Fprintf(stdout, "nellie %s\n", Version)
+		return exitOK
 	}
 	if err := loadDotenv(".env", stderr); err != nil {
 		fmt.Fprintf(stderr, "nellie: reading .env: %v\n", err)
