@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
 
@@ -41,6 +42,32 @@ Commands:
 Run "nellie <command> -h" for a command's flags.
 Run "nellie --version" for the version.
 `
+
+// dryRunNote heads every --dry-run script. The password is redacted, so piping
+// the script to psql would create a role whose password is the text "<redacted>".
+const dryRunNote = "-- dry run: the password is redacted, so this script is not meant to be run as is\n"
+
+// interruptContext returns a context that Ctrl-C cancels, and a stop function
+// to defer. The first Ctrl-C says what is being undone and gives the
+// signal back, so a second Ctrl-C stops the process (leaving what is named
+// there behind) instead of being swallowed while cleanup runs.
+func interruptContext(stderr io.Writer, name string) (context.Context, func()) {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	done := make(chan struct{})
+	go func() {
+		<-ctx.Done()
+		stop()
+		select {
+		case <-done: // the command finished; stop() below cancelled ctx, not Ctrl-C
+		default:
+			fmt.Fprintf(stderr, "\nnellie: interrupted; undoing anything created for %s. Press Ctrl-C again to quit and leave it behind.\n", name)
+		}
+	}()
+	return ctx, func() {
+		close(done)
+		stop()
+	}
+}
 
 // Run dispatches args (without the program name) to a subcommand and returns
 // the process exit code. Taking the streams as arguments instead of using

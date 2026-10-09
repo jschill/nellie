@@ -433,3 +433,30 @@ func TestVersion(t *testing.T) {
 		})
 	}
 }
+
+// Value: protects that every dry-run script is headed by the not-runnable note and never contains a real password; fails_when=the header is dropped or a generated password reaches dry-run stdout; why_new=the dry-run tests check single SQL statements, not the redaction or the warning; seam=none
+func TestDryRunIsMarkedNotRunnable(t *testing.T) {
+	tests := []struct {
+		name  string
+		args  []string
+		stdin string
+	}{
+		{"add-project", []string{"add-project", "--dry-run"}, "iba\n"},
+		{"add-user", []string{"add-user", "--dry-run"}, "iba\n\n\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if code := Run(tt.args, strings.NewReader(tt.stdin), &stdout, &stderr); code != exitOK {
+				t.Fatalf("exit code = %d; stderr:\n%s", code, stderr.String())
+			}
+			out := stdout.String()
+			if !strings.HasPrefix(out, dryRunNote) {
+				t.Errorf("dry run lacks the not-runnable header:\n%s", out)
+			}
+			if !strings.Contains(out, "PASSWORD '<redacted>'") || strings.Contains(out, "SCRAM-SHA-256$") {
+				t.Errorf("dry run must redact the password:\n%s", out)
+			}
+		})
+	}
+}

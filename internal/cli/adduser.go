@@ -1,11 +1,8 @@
 package cli
 
 import (
-	"context"
 	"fmt"
 	"io"
-	"os"
-	"os/signal"
 
 	"github.com/jschill/nellie/internal/pg"
 )
@@ -34,7 +31,7 @@ func addUser(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 		// Without a connection we can't look up the owner, so assume the
 		// add-project convention: a role named like the database.
-		fmt.Fprint(stdout, user.Plan(user.Project, redacted).Script(user.Project))
+		fmt.Fprint(stdout, dryRunNote+user.Plan(user.Project, redacted).Script(user.Project))
 		return exitOK
 	}
 
@@ -47,14 +44,8 @@ func addUser(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return fail(stderr, err)
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := interruptContext(stderr, user.Name)
 	defer stop()
-	// Once the first Ctrl-C has cancelled ctx, give the signal back: cleanup can
-	// take a while, and a second Ctrl-C should stop it rather than be swallowed.
-	go func() {
-		<-ctx.Done()
-		stop()
-	}()
 
 	password := pg.NewPassword()
 	if err := pg.AddUser(ctx, cfg, user, password); err != nil {

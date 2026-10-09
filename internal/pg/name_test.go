@@ -26,6 +26,7 @@ func TestValidateProjectName(t *testing.T) {
 		{"åsa", false},        // non-ASCII
 		{`iba"; DROP`, false}, // quoting tricks
 		{"pg_stuff", false},   // reserved role prefix
+		{"pg", false},         // its users would all start with pg_
 		{"iba\n", false},      // regexp $ must not match before a trailing newline
 	}
 	for _, tt := range tests {

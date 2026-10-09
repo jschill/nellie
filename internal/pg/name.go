@@ -23,7 +23,14 @@ var nameRe = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
 // ValidateProjectName reports whether name can be used both as a database
 // name and as the name of the role that owns it.
 func ValidateProjectName(name string) error {
-	return validateName("project", name, MaxProjectNameLen)
+	if err := validateName("project", name, MaxProjectNameLen); err != nil {
+		return err
+	}
+	// Every user is named <project>_<suffix>, and role names can't start with pg_.
+	if name == "pg" {
+		return errors.New(`project name can't be "pg": its users would be named pg_..., which Postgres reserves`)
+	}
+	return nil
 }
 
 // ValidateUserName reports whether name can be used as the name of a user in
