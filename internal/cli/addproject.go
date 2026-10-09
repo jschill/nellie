@@ -15,7 +15,7 @@ Add more users with "nellie add-user".
 `
 
 func addProject(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	opts, code, ok := parseFlags("add-project", addProjectHelp, args, stderr)
+	opts, code, ok := parseFlags(command{name: "add-project", help: addProjectHelp}, args, stderr)
 	if !ok {
 		return code
 	}
