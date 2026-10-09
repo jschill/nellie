@@ -225,6 +225,15 @@ NELLIE_TEST_DSN=postgres://nellie_admin:admin@localhost:55439/postgres go test -
 
 Without `NELLIE_TEST_DSN` they're skipped.
 
+## Contributing
+
+- Conventions, the data model and the safety rules are in [CLAUDE.md](CLAUDE.md).
+  AI coding agents should also read [AGENTS.md](AGENTS.md).
+- Commits must be signed (`git commit -S`, or `git config commit.gpgsign true`).
+- Before opening a PR, run the checks from the Development section above:
+  `go build ./...`, `go vet ./...`, `go test ./...` and `gofmt -l .` (which must
+  print nothing).
+
 ## Why "nellie"?
 
 Named after *Nellie the Elephant*, by way of the Toy Dolls' punk cover. She
