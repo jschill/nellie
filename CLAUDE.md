@@ -53,9 +53,24 @@ Short, lowercase, verb-noun subcommands:
 ```
 nellie add-project     # asks for the name (done)
 nellie add-user        # asks for project and user name (done)
-nellie rotate-password <user>
+nellie rotate-password [<user>]   # asks for the user if not given (done)
 nellie list            # alias: nellie trumpet
 ```
+
+`rotate-password` asks for the new password; empty input on a terminal, or
+`--generate`, generates one.
+Typed passwords are hidden and asked twice on a terminal; piped input is read
+as one non-empty line, unconfirmed (that's the secrets-manager path, so
+there's no `--password-stdin`); an empty piped line is an error, not
+"generate". With piped input the input is only the password: the
+user must be the argument and the admin connection must come from the
+environment, else exit 2. It refuses roles that don't exist, can't log in,
+are superusers, are the admin itself, have `CREATEROLE`, `REPLICATION` or
+`BYPASSRLS`, or are members of a role that has, or of any predefined `pg_*`
+role except `pg_database_owner`; it warns when the role's `VALID UNTIL` has passed. Piped input must
+be a single line. The URL's database is the longest prefix
+of the role name (cut at `_`, or the whole name) that is an existing database
+the role can connect to; none found means no URL.
 
 Common flags, registered on every subcommand's FlagSet: `--dry-run`, and
 `--json` where output is data (e.g. `list`). No `--dsn`: a connection string
@@ -154,9 +169,13 @@ These are non-negotiable — the tool creates roles and sets passwords.
   a clear error.
 - **Passwords:**
   - Never accept a password as a flag value or argument (shell history,
-    `ps`). Either generate one or read it with `--password-stdin`.
+    `ps`). Either generate one or prompt for it (hidden on a terminal).
   - Generated passwords: `crypto/rand.Text()` (26 chars, 130 bits), printed
-    once to stdout and nowhere else.
+    once to stdout and nowhere else. A password the user typed is never
+    printed back, not even in `--json`.
+  - Typed passwords must be printable ASCII: Postgres runs passwords through
+    SASLprep before hashing, and nellie's client-side verifier doesn't, so
+    non-ASCII passwords could hash differently and never work.
   - Compute the SCRAM-SHA-256 verifier client-side and send that in
     `CREATE/ALTER ROLE ... PASSWORD`, so plaintext never reaches server logs
     (same approach as psql's `\password`).
