@@ -130,7 +130,8 @@ Postgres; nellie doesn't change them.
 
 Project names are lowercase letters, digits and `_`, start with a letter,
 and are at most 57 characters long, so that every user name nellie suggests
-still fits within Postgres's 63-character limit.
+still fits within Postgres's 63-character limit. `pg` is refused, because its
+users would be named `pg_...`, a prefix Postgres reserves.
 
 ### `nellie add-user`
 
@@ -205,6 +206,7 @@ can't finish; the exit code is still 130.
 ```bash
 go build ./...
 go vet ./...
+go vet -tags integration ./...
 gofmt -l .        # should print nothing
 go test ./...     # unit tests, no database needed
 ```
@@ -233,8 +235,8 @@ Without `NELLIE_TEST_DSN` they're skipped.
   AI coding agents should also read [AGENTS.md](AGENTS.md).
 - Commits must be signed (`git commit -S`, or `git config commit.gpgsign true`).
 - Before opening a PR, run the checks from the Development section above:
-  `go build ./...`, `go vet ./...`, `go test ./...` and `gofmt -l .` (which must
-  print nothing).
+  `go build ./...`, `go vet ./...`, `go vet -tags integration ./...`,
+  `go test ./...` and `gofmt -l .` (which must print nothing).
 
 ## Why "nellie"?
 
