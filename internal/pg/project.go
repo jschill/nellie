@@ -37,7 +37,9 @@ func (p Project) Plan(secret string) Plan {
 		},
 		CreateDB: fmt.Sprintf("CREATE DATABASE %s OWNER %s", name, name),
 		DBGrants: []string{
-			fmt.Sprintf("REVOKE CONNECT ON DATABASE %s FROM PUBLIC", name),
+			// ALL, not just CONNECT: PUBLIC also has TEMPORARY by default, and
+			// that would let app users create temp tables.
+			fmt.Sprintf("REVOKE ALL ON DATABASE %s FROM PUBLIC", name),
 			fmt.Sprintf("GRANT CONNECT ON DATABASE %s TO %s", name, name),
 		},
 	}
@@ -73,38 +75,49 @@ func CreateProject(ctx context.Context, cfg *pgx.ConnConfig, p Project, password
 	// From here on a failure would leave objects behind, so undo them. This
 	// runs after any return below and sees the error it returned, because err
 	// is a named result.
+	// Only drop the database if this call created it. If another session
+	// created one with this name after our check, CREATE DATABASE fails and
+	// that database isn't ours to drop.
+	dbCreated := false
 	defer func() {
 		if err == nil {
 			return
 		}
 		// Not ctx: if the failure was ctx being cancelled (Ctrl-C), the
 		// cleanup still has to run.
-		if cerr := dropProject(context.Background(), cfg, p); cerr != nil {
-			err = errors.Join(err, fmt.Errorf("cleanup failed, database and role %s may be left behind: %w", p.Name, cerr))
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
+		defer cancel()
+		if cerr := dropProject(cleanupCtx, cfg, p, dbCreated); cerr != nil {
+			err = errors.Join(err, fmt.Errorf("%w, database and role %s may be left behind: %w", ErrCleanupFailed, p.Name, cerr))
 		}
 	}()
 
 	if _, err := admin.Exec(ctx, plan.CreateDB); err != nil {
 		return fmt.Errorf("creating database: %w", err)
 	}
+	dbCreated = true
 	if err := runTx(ctx, admin, plan.DBGrants); err != nil {
 		return fmt.Errorf("granting database privileges: %w", err)
 	}
 	return nil
 }
 
-// dropProject removes everything CreateProject may have created. It opens its
-// own connection, because the caller's may be broken by whatever went wrong.
-func dropProject(ctx context.Context, cfg *pgx.ConnConfig, p Project) error {
+// dropProject removes what CreateProject created. The database is dropped only
+// if dropDB is set, meaning this call created it. The role always was created
+// here, since the role transaction ran before any defer was set up. It opens
+// its own connection, because the caller's may be broken by whatever went wrong.
+func dropProject(ctx context.Context, cfg *pgx.ConnConfig, p Project, dropDB bool) error {
 	conn, err := pgx.ConnectConfig(ctx, cfg)
 	if err != nil {
 		return err
 	}
 	defer conn.Close(ctx)
 
-	return execAll(ctx, conn,
+	var stmts []string
+	if dropDB {
 		// The database first: its owner can't be dropped while it exists.
-		"DROP DATABASE IF EXISTS "+ident(p.Name),
-		"DROP ROLE IF EXISTS "+ident(p.Name),
-	)
+		stmts = append(stmts, "DROP DATABASE IF EXISTS "+ident(p.Name))
+	}
+	stmts = append(stmts, "DROP ROLE IF EXISTS "+ident(p.Name))
+	return execAll(ctx, conn, stmts...)
 }

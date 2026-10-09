@@ -6,10 +6,14 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"strings"
 
 	"golang.org/x/term"
 )
+
+// exitInterrupted is the exit code for a command stopped by Ctrl-C (128 + SIGINT).
+const exitInterrupted = 130
 
 // prompter reads answers from stdin. Every prompt in a command must go
 // through the same prompter: bufio.Scanner reads ahead, so a second scanner
@@ -51,6 +55,28 @@ func (p *prompter) secret(label string) (string, error) {
 	if p.fd < 0 {
 		return p.line(label)
 	}
+	old, err := term.GetState(p.fd)
+	if err != nil {
+		return "", err
+	}
+	// ReadPassword turns echo off until it returns. Ctrl-C arrives as SIGINT and
+	// would end the process first, leaving the shell with echo off. So catch it
+	// here, put the terminal back, and exit the way an interrupted command does.
+	interrupts := make(chan os.Signal, 1)
+	signal.Notify(interrupts, os.Interrupt)
+	defer signal.Stop(interrupts)
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-interrupts:
+			term.Restore(p.fd, old)
+			fmt.Fprintln(p.out)
+			os.Exit(exitInterrupted)
+		case <-done:
+		}
+	}()
+
 	fmt.Fprint(p.out, label)
 	b, err := term.ReadPassword(p.fd)
 	fmt.Fprintln(p.out) // the Enter key wasn't echoed either

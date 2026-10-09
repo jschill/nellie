@@ -38,7 +38,7 @@ func addUser(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return exitOK
 	}
 
-	cfg, err := connConfig(opts.dsn, prompt)
+	cfg, err := connConfig(prompt)
 	if err != nil {
 		return fail(stderr, err)
 	}
@@ -49,6 +49,12 @@ func addUser(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
+	// Once the first Ctrl-C has cancelled ctx, give the signal back: cleanup can
+	// take a while, and a second Ctrl-C should stop it rather than be swallowed.
+	go func() {
+		<-ctx.Done()
+		stop()
+	}()
 
 	password := pg.NewPassword()
 	if err := pg.AddUser(ctx, cfg, user, password); err != nil {
@@ -72,8 +78,8 @@ var userKinds = []struct {
 	kind pg.UserKind
 	choice
 }{
-	{pg.AppUser, choice{key: "app", label: "Application", desc: "reads and writes rows, can't change the schema"}},
-	{pg.AdminUser, choice{key: "admin", label: "Admin", desc: "can do everything, like the owner"}},
+	{pg.AppUser, choice{key: pg.AppUser.DefaultSuffix(), label: "Application", desc: "reads and writes rows, can't change the schema"}},
+	{pg.AdminUser, choice{key: pg.AdminUser.DefaultSuffix(), label: "Admin", desc: "can do everything, like the owner"}},
 }
 
 func promptUser(p *prompter) (pg.User, error) {

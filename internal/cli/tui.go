@@ -63,14 +63,30 @@ func (p *prompter) readKeys() ([]keyPress, error) {
 	for len(b) > 0 {
 		c := b[0]
 		switch {
-		case c == 0x1b && len(b) >= 3 && b[1] == '[':
-			switch b[2] {
+		case c == 0x1b && len(b) >= 2 && b[1] == '[':
+			// A CSI sequence: ESC [, then parameter bytes (0x30-0x3F) such as "1;5"
+			// and intermediate bytes (0x20-0x2F), then one final byte (0x40-0x7E).
+			// Ctrl-Up is ESC [ 1 ; 5 A. Any other byte ends the sequence early
+			// without being consumed, so ESC [ followed by Enter still gets Enter.
+			end := 2
+			for end < len(b) && b[end] >= 0x20 && b[end] <= 0x3f {
+				end++
+			}
+			if end == len(b) {
+				b = nil // incomplete sequence at the end of this read: drop the rest
+				continue
+			}
+			if b[end] < 0x40 || b[end] > 0x7e {
+				b = b[end:] // malformed: drop ESC [ and its parameters, keep the rest
+				continue
+			}
+			switch b[end] {
 			case 'A':
 				keys = append(keys, keyPress{key: keyUp})
 			case 'B':
 				keys = append(keys, keyPress{key: keyDown})
 			}
-			b = b[3:]
+			b = b[end+1:]
 			continue
 		case c == '\r' || c == '\n':
 			keys = append(keys, keyPress{key: keyEnter})

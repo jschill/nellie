@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -14,6 +15,9 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/jschill/nellie/internal/pg"
 )
 
 // Exit codes.
@@ -29,7 +33,7 @@ Usage: nellie <command> [flags]
 
 Commands:
   add-project   create a database and a role with the same name that owns it
-  add-user      add a user that can read and write rows in a project
+  add-user      add a user to a project: application (reads and writes) or admin
 
 Run "nellie <command> -h" for a command's flags.
 `
@@ -42,7 +46,7 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprint(stderr, usage)
 		return exitUsage
 	}
-	if err := loadDotenv(".env"); err != nil {
+	if err := loadDotenv(".env", stderr); err != nil {
 		fmt.Fprintf(stderr, "nellie: reading .env: %v\n", err)
 		return exitError
 	}
@@ -60,20 +64,15 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 }
 
-// connConfig resolves the admin connection, in order: the --dsn flag,
-// $DATABASE_URL, the standard PG* environment variables, and finally asking.
-// The environment variables may come from a .env file (see loadDotenv).
-// Whatever pgx gets, it also reads ~/.pgpass, like psql.
-func connConfig(dsn string, p *prompter) (*pgx.ConnConfig, error) {
-	if dsn == "" {
-		dsn = os.Getenv("DATABASE_URL")
-	}
-	if dsn != "" || hasPGEnv() {
-		cfg, err := pgx.ParseConfig(dsn)
-		if err != nil {
-			return nil, fmt.Errorf("parsing connection settings: %w", err)
-		}
-		return cfg, nil
+// connConfig resolves the admin connection: $DATABASE_URL, then the standard
+// PG* environment variables, then asking. Whatever pgx gets, it also reads
+// ~/.pgpass, like psql.
+//
+// There is deliberately no --dsn flag: a connection string on the command line
+// would carry the admin password into shell history and the process list.
+func connConfig(p *prompter) (*pgx.ConnConfig, error) {
+	if dsn := os.Getenv("DATABASE_URL"); dsn != "" || hasPGEnv() {
+		return parseAdmin(dsn)
 	}
 
 	for {
@@ -83,11 +82,79 @@ func connConfig(dsn string, p *prompter) (*pgx.ConnConfig, error) {
 		if err != nil {
 			return nil, fmt.Errorf("reading connection URL: %w", err)
 		}
-		cfg, err := pgx.ParseConfig(dsn)
+		cfg, err := parseAdmin(dsn)
 		if err == nil {
 			return cfg, nil
 		}
-		fmt.Fprintln(p.out, err) // pgx redacts the password in its errors
+		fmt.Fprintln(p.out, err)
+	}
+}
+
+// errBadURL is what the user sees when pgx can't read the connection settings.
+// pgx's own message can echo the connection string, password included, so it
+// is never shown.
+var errBadURL = errors.New("those connection settings aren't valid; check the URL and try again")
+
+// parseAdmin reads the connection settings with pgx, which handles every form
+// it accepts (URL or keyword, service files, PG* variables), then enforces TLS
+// on what pgx resolved. Unix sockets don't use TLS and are left alone.
+//
+// pgx's default, prefer, tries TLS and then plaintext. Here the plaintext
+// attempts are dropped, so a server without TLS is an error, not a downgrade.
+// That also makes require the effective default, and prefer and an empty
+// sslmode behave the same way. sslmode=disable is kept, since it was asked for.
+func parseAdmin(dsn string) (*pgx.ConnConfig, error) {
+	cfg, err := pgx.ParseConfig(dsn)
+	if err != nil {
+		return nil, errBadURL
+	}
+	if allUnixSockets(cfg) {
+		return cfg, nil
+	}
+	if cfg.TLSConfig == nil {
+		for _, fb := range cfg.Fallbacks {
+			if fb.TLSConfig != nil {
+				return nil, errors.New("sslmode=allow would try plaintext first; use require, verify-full or disable")
+			}
+		}
+		return cfg, nil // sslmode=disable
+	}
+	var tlsOnly []*pgconn.FallbackConfig
+	for _, fb := range cfg.Fallbacks {
+		if fb.TLSConfig != nil {
+			tlsOnly = append(tlsOnly, fb)
+		}
+	}
+	cfg.Fallbacks = tlsOnly
+	return cfg, nil
+}
+
+// allUnixSockets reports whether every host pgx will try is a Unix socket.
+func allUnixSockets(cfg *pgx.ConnConfig) bool {
+	if !strings.HasPrefix(cfg.Host, "/") {
+		return false
+	}
+	for _, fb := range cfg.Fallbacks {
+		if !strings.HasPrefix(fb.Host, "/") {
+			return false
+		}
+	}
+	return true
+}
+
+// sslModeOf names the sslmode a parsed TCP config uses, in libpq's terms, so
+// the printed app URLs can repeat it. It reads what pgx resolved, not the
+// string, so service files and duplicate keys come out right.
+func sslModeOf(cfg *pgx.ConnConfig) string {
+	switch {
+	case cfg.TLSConfig == nil:
+		return "disable"
+	case cfg.TLSConfig.VerifyPeerCertificate != nil:
+		return "verify-ca" // checked before InsecureSkipVerify, which verify-ca also sets
+	case cfg.TLSConfig.InsecureSkipVerify:
+		return "require"
+	default:
+		return "verify-full"
 	}
 }
 
@@ -104,7 +171,6 @@ func hasPGEnv() bool {
 
 // options are the flags every command takes.
 type options struct {
-	dsn    string
 	dryRun bool
 }
 
@@ -113,7 +179,6 @@ type options struct {
 func parseFlags(name, help string, args []string, stderr io.Writer) (opts options, code int, ok bool) {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	fs.StringVar(&opts.dsn, "dsn", "", "admin connection string (default: $DATABASE_URL, then the PG* environment variables, then ask)")
 	fs.BoolVar(&opts.dryRun, "dry-run", false, "print the SQL instead of running it")
 	fs.Usage = func() {
 		fmt.Fprintf(stderr, "Usage: nellie %s [flags]\n\n%s\nFlags:\n", name, help)
@@ -130,28 +195,45 @@ func parseFlags(name, help string, args []string, stderr io.Writer) (opts option
 		fmt.Fprintf(stderr, "nellie: %s takes no arguments; it asks for what it needs\n", name)
 		return opts, exitUsage, false
 	}
-	return opts, 0, true
+	return opts, exitOK, true
 }
 
-// fail reports err and returns the exit code for a runtime error.
+// fail reports err and returns the exit code for a runtime error. An
+// interrupt gets the same code whichever prompt it came from. If the cleanup
+// after an interrupt failed too, the message says what was left behind: that
+// is more important than saying "interrupted".
 func fail(stderr io.Writer, err error) int {
+	if errors.Is(err, errInterrupted) || errors.Is(err, context.Canceled) {
+		if errors.Is(err, pg.ErrCleanupFailed) {
+			fmt.Fprintf(stderr, "nellie: interrupted: %v\n", err)
+		} else {
+			fmt.Fprintln(stderr, "nellie: interrupted")
+		}
+		return exitInterrupted
+	}
 	fmt.Fprintf(stderr, "nellie: %v\n", err)
 	return exitError
 }
 
 // connURL builds a connection string for a project role on the same server
-// as the admin connection.
+// as the admin connection. It repeats the admin's sslmode, so the app never
+// connects with weaker TLS. Unix sockets have no sslmode.
 func connURL(cfg *pgx.ConnConfig, user, password, db string) string {
 	u := url.URL{
 		Scheme: "postgres",
 		User:   url.UserPassword(user, password),
 		Path:   "/" + db,
 	}
-	if strings.HasPrefix(cfg.Host, "/") {
-		// A Unix socket directory can't go in the host part of a URL.
-		u.RawQuery = url.Values{"host": {cfg.Host}}.Encode()
+	query := url.Values{}
+	if allUnixSockets(cfg) {
+		// pgx reads a socket directory from the host parameter, so it goes in
+		// the query. The port has to travel with it, or it's silently lost.
+		query.Set("host", cfg.Host)
+		query.Set("port", strconv.Itoa(int(cfg.Port)))
 	} else {
 		u.Host = net.JoinHostPort(cfg.Host, strconv.Itoa(int(cfg.Port)))
+		query.Set("sslmode", sslModeOf(cfg))
 	}
+	u.RawQuery = query.Encode()
 	return u.String()
 }

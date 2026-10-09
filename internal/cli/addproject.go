@@ -34,7 +34,7 @@ func addProject(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 
 	// Where to connect first, then what to create. (A dry run needs no connection.)
-	cfg, err := connConfig(opts.dsn, prompt)
+	cfg, err := connConfig(prompt)
 	if err != nil {
 		return fail(stderr, err)
 	}
@@ -47,6 +47,12 @@ func addProject(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// no longer kills the process, it cancels ctx.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
+	// Once the first Ctrl-C has cancelled ctx, give the signal back: cleanup can
+	// take a while, and a second Ctrl-C should stop it rather than be swallowed.
+	go func() {
+		<-ctx.Done()
+		stop()
+	}()
 
 	password := pg.NewPassword()
 	if err := pg.CreateProject(ctx, cfg, project, password); err != nil {

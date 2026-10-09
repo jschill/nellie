@@ -12,6 +12,9 @@ import (
 // scramIterations matches Postgres's default (scram_iterations).
 const scramIterations = 4096
 
+// scramSaltLen is the salt size Postgres uses for SCRAM verifiers.
+const scramSaltLen = 16
+
 // NewPassword returns a random 26-character password (130 bits of entropy).
 // It only uses A-Z and 2-7, so it's safe in URLs and shells without escaping.
 func NewPassword() string {
@@ -25,7 +28,7 @@ func NewPassword() string {
 // Postgres runs passwords through SASLprep first; for the ASCII passwords from
 // NewPassword that's a no-op, so it's skipped here.
 func scramVerifier(password string) (string, error) {
-	salt := make([]byte, 16)
+	salt := make([]byte, scramSaltLen)
 	rand.Read(salt) // never returns an error since Go 1.24
 	return scramVerifierWithSalt(password, salt, scramIterations)
 }

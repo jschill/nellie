@@ -5,9 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 )
+
+// cleanupTimeout bounds the cleanup after a failure, so a hung server can't
+// stop nellie from exiting.
+const cleanupTimeout = 30 * time.Second
 
 // minServerVersion is Postgres 15: from there on the public schema is owned by
 // pg_database_owner and PUBLIC can't create objects in it. The grants rely on
@@ -19,6 +24,9 @@ var (
 	ErrExists = errors.New("name already in use")
 	// ErrNotFound means a database nellie was asked to use doesn't exist.
 	ErrNotFound = errors.New("does not exist")
+	// ErrCleanupFailed means nellie failed and then couldn't undo what it had
+	// created, so a role or database may be left behind.
+	ErrCleanupFailed = errors.New("cleanup failed")
 )
 
 // Plan is SQL grouped by where and how it runs. Empty groups are skipped.
@@ -72,6 +80,11 @@ func checkServerVersion(ctx context.Context, conn *pgx.Conn) error {
 	if err != nil {
 		return fmt.Errorf("checking server version: %w", err)
 	}
+	return checkVersion(version)
+}
+
+// checkVersion takes server_version_num, such as 150004 for 15.4.
+func checkVersion(version int) error {
 	if version < minServerVersion {
 		return fmt.Errorf("server runs Postgres %d; nellie needs %d or newer", version/10000, minServerVersion/10000)
 	}

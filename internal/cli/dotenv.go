@@ -14,7 +14,12 @@ import (
 // dotenv. Variables that are already set win, so a one-off
 // `DATABASE_URL=... nellie add-project` still overrides the file. A missing
 // file isn't an error.
-func loadDotenv(path string) error {
+//
+// Connection-target keys (PG*) and TLS trust keys (SSL_CERT_*) are never taken
+// from the file: a .env in a checked-out repo could otherwise point nellie at
+// another host while the admin password is in the environment. They're skipped
+// with a warning that names the key. Set them in your shell instead.
+func loadDotenv(path string, warn io.Writer) error {
 	f, err := os.Open(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
@@ -29,11 +34,20 @@ func loadDotenv(path string) error {
 		return fmt.Errorf("%s: %w", path, err)
 	}
 	for _, v := range vars {
+		if fileMayNotSet(v.key) {
+			fmt.Fprintf(warn, "nellie: ignoring %s in .env; set it in your shell instead\n", v.key)
+			continue
+		}
 		if _, set := os.LookupEnv(v.key); !set {
 			os.Setenv(v.key, v.value)
 		}
 	}
 	return nil
+}
+
+// fileMayNotSet reports whether key must come from the environment, not .env.
+func fileMayNotSet(key string) bool {
+	return strings.HasPrefix(key, "PG") || strings.HasPrefix(key, "SSL_CERT_")
 }
 
 type envVar struct{ key, value string }

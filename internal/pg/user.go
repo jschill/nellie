@@ -56,11 +56,11 @@ func NewUser(kind UserKind, name, project string) (User, error) {
 // project database; secret is used as described for Project.Plan.
 func (u User) Plan(owner, secret string) Plan {
 	user, db, own := ident(u.Name), ident(u.Project), ident(owner)
+	// Everything before the schema grants runs in one transaction in AddUser,
+	// so it's all in Roles: the dry run then shows the same transaction.
 	plan := Plan{
 		Roles: []string{
 			fmt.Sprintf("CREATE ROLE %s LOGIN PASSWORD %s", user, literal(secret)),
-		},
-		DBGrants: []string{
 			fmt.Sprintf("GRANT CONNECT ON DATABASE %s TO %s", db, user),
 		},
 	}
@@ -71,7 +71,7 @@ func (u User) Plan(owner, secret string) Plan {
 			fmt.Sprintf("GRANT %s TO %s", own, user),
 			// ...and this makes every session in the project database start with
 			// SET ROLE <owner>, so what it creates is owned by the owner.
-			fmt.Sprintf("ALTER ROLE %s IN DATABASE %s SET role TO %s", user, db, literal(owner)),
+			fmt.Sprintf("ALTER ROLE %s IN DATABASE %s SET role TO %s", user, db, own),
 		)
 		return plan
 	}
@@ -115,7 +115,7 @@ func AddUser(ctx context.Context, cfg *pgx.ConnConfig, u User, password string) 
 	}
 	plan := u.Plan(owner, verifier)
 
-	if err := runTx(ctx, admin, append(plan.Roles, plan.DBGrants...)); err != nil {
+	if err := runTx(ctx, admin, plan.Roles); err != nil {
 		return fmt.Errorf("creating role: %w", err)
 	}
 
@@ -124,8 +124,10 @@ func AddUser(ctx context.Context, cfg *pgx.ConnConfig, u User, password string) 
 		if err == nil {
 			return
 		}
-		if cerr := dropUser(context.Background(), cfg, u); cerr != nil {
-			err = errors.Join(err, fmt.Errorf("cleanup failed, role %s may be left behind: %w", u.Name, cerr))
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
+		defer cancel()
+		if cerr := dropUser(cleanupCtx, cfg, u); cerr != nil {
+			err = errors.Join(err, fmt.Errorf("%w, role %s may be left behind: %w", ErrCleanupFailed, u.Name, cerr))
 		}
 	}()
 

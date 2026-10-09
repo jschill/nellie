@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"bytes"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -65,7 +67,7 @@ func TestLoadDotenvKeepsExistingVars(t *testing.T) {
 	t.Setenv("NELLIE_TEST_UNSET", "") // registers cleanup for the next line
 	os.Unsetenv("NELLIE_TEST_UNSET")
 
-	if err := loadDotenv(path); err != nil {
+	if err := loadDotenv(path, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	if got := os.Getenv("NELLIE_TEST_SET"); got != "from-shell" {
@@ -77,7 +79,41 @@ func TestLoadDotenvKeepsExistingVars(t *testing.T) {
 }
 
 func TestLoadDotenvMissingFile(t *testing.T) {
-	if err := loadDotenv(filepath.Join(t.TempDir(), "nope")); err != nil {
+	if err := loadDotenv(filepath.Join(t.TempDir(), "nope"), io.Discard); err != nil {
 		t.Errorf("missing file: %v", err)
+	}
+}
+
+// Value: protects=PG* connection settings and SSL trust settings are never taken from .env, so a checked-out .env can't redirect the admin connection; fails_when=PGHOST or SSL_CERT_FILE from the file gets set, or the warning doesn't name the key; why_new=the .env allow-list has no test; seam=none
+func TestLoadDotenvIgnoresConnectionKeys(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(path, []byte("PGHOST=attacker.example\nSSL_CERT_FILE=/tmp/evil.pem\nNELLIE_TEST_ALLOWED=ok\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"PGHOST", "SSL_CERT_FILE", "NELLIE_TEST_ALLOWED"} {
+		t.Setenv(k, "")
+		os.Unsetenv(k)
+	}
+
+	var warn bytes.Buffer
+	if err := loadDotenv(path, &warn); err != nil {
+		t.Fatal(err)
+	}
+	if _, set := os.LookupEnv("PGHOST"); set {
+		t.Error("PGHOST was set from .env")
+	}
+	if _, set := os.LookupEnv("SSL_CERT_FILE"); set {
+		t.Error("SSL_CERT_FILE was set from .env")
+	}
+	if os.Getenv("NELLIE_TEST_ALLOWED") != "ok" {
+		t.Error("an ordinary key from .env should still be loaded")
+	}
+	for _, k := range []string{"PGHOST", "SSL_CERT_FILE"} {
+		if !strings.Contains(warn.String(), k) {
+			t.Errorf("no warning naming %s:\n%s", k, warn.String())
+		}
+	}
+	if strings.Contains(warn.String(), "attacker.example") {
+		t.Errorf("the warning echoes a value:\n%s", warn.String())
 	}
 }
