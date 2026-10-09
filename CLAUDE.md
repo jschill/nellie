@@ -56,8 +56,10 @@ nellie rotate-password <user>
 nellie list            # alias: nellie trumpet
 ```
 
-Common flags, registered on every subcommand's FlagSet: `--dsn`, `--dry-run`,
-`--json` (where output is data, e.g. `list`).
+Common flags, registered on every subcommand's FlagSet: `--dry-run`, and
+`--json` where output is data (e.g. `list`). No `--dsn`: a connection string
+on the command line would carry the admin password into shell history and the
+process list.
 
 ## Build, test, lint
 
@@ -73,14 +75,26 @@ Run all of these before calling a change done.
 
 ## Connecting to Postgres
 
-- Connection precedence: `--dsn` flag > `DATABASE_URL` > standard libpq `PG*`
-  env vars (`PGHOST`, `PGUSER`, …, honored by `pgx.ParseConfig`) > asking.
-  The prompt hides input on a terminal (`golang.org/x/term`), since the URL
-  usually holds the admin password; empty input means pgx's local defaults.
+- Connection precedence: `DATABASE_URL` > standard libpq `PG*` env vars
+  (`PGHOST`, `PGUSER`, …, honored by `pgx.ParseConfig`) > asking.
+- TLS: `parseAdmin` (cli.go) lets pgx parse the settings, then drops the
+  plaintext attempts from the resolved config. So `prefer`, an empty sslmode
+  and the default all become `require`; `sslmode=disable` is honored when set;
+  `sslmode=allow` is refused. Parsing the string by hand is what the red team
+  broke (keyword spaces, duplicate keys, service files), so don't reintroduce
+  it. `require` encrypts but doesn't verify the server certificate, a
+  deliberate trade-off (see README). Unix sockets are exempt. `connURL` repeats
+  the admin's resolved sslmode (`sslModeOf`) in the app URLs.
+- Errors from pgx can echo the connection string, so `parseAdmin` returns a
+  fixed message instead. Keep it that way.
+- Asking: the prompt hides input on a terminal (`golang.org/x/term`), since the
+  URL usually holds the admin password; empty input means pgx's local defaults.
   `~/.pgpass` works via pgx in every case.
 - `cli.Run` loads `.env` from the current directory first (own small parser
   in `internal/cli/dotenv.go`, no dependency). Variables already set in the
-  environment win. `.env` is gitignored; `.env.example` shows the format.
+  environment win. `PG*` and `SSL_CERT_*` keys are skipped with a warning,
+  so a checked-out `.env` can't redirect the admin connection; all other keys
+  load. `.env` is gitignored; `.env.example` shows the format.
 - All prompts in a command share one `prompter` (`internal/cli/prompt.go`):
   `bufio.Scanner` reads ahead, so a second scanner on stdin can lose input.
   Prompts go to stderr, so stdout stays clean.
@@ -99,8 +113,9 @@ Like Supabase: a project starts with **one role that can do everything**, and
 more restricted users are added separately.
 
 - `add-project <name>` creates:
-  - the database `<name>`, owned by the role `<name>`. `CONNECT` is revoked
-    from `PUBLIC` and granted to the owner.
+  - the database `<name>`, owned by the role `<name>`. All privileges are
+    revoked from `PUBLIC` (not just CONNECT, which leaves TEMPORARY open), so
+    app users can't create temp tables.
   - the role `<name>` (`LOGIN`): owns the database and its public schema, so
     it can do everything, including running migrations.
 - `add-user` asks for a project, a user type (arrow-key menu) and a name,
@@ -114,7 +129,7 @@ more restricted users are added separately.
     **must** run as the owner (or an admin user) or new tables are invisible
     to app users.
   - **Admin**: member of the owner role, plus
-    `ALTER ROLE <user> IN DATABASE <db> SET role TO '<owner>'`, so its
+    `ALTER ROLE <user> IN DATABASE <db> SET role TO "<owner>"`, so its
     sessions act as the owner and whatever it creates is owned by the owner.
     That keeps the default privileges for app users working.
 - The owner is looked up in `pg_database`, so `add-user` also works for
@@ -157,7 +172,8 @@ These are non-negotiable — the tool creates roles and sets passwords.
 
 - Human output to stdout, errors to stderr.
 - `--json` output is stable and pun-free.
-- Exit codes: `0` success, `1` runtime/database error, `2` usage error.
+- Exit codes: `0` success, `1` runtime/database error, `2` usage error,
+  `130` interrupted by Ctrl-C (128 + SIGINT, from either kind of prompt).
 
 ## Testing
 

@@ -61,12 +61,15 @@ if it isn't.
 
 nellie looks for the admin connection in this order:
 
-1. the `--dsn` flag
-2. `DATABASE_URL`
-3. the standard Postgres variables (`PGHOST`, `PGUSER`, …) and `~/.pgpass`,
+1. `DATABASE_URL`
+2. the standard Postgres variables (`PGHOST`, `PGUSER`, …) and `~/.pgpass`,
    same as `psql`
-4. if none of those are set, it asks, and hides what you type, since the URL
+3. if neither is set, it asks, and hides what you type, since the URL
    usually contains a password
+
+There is no `--dsn` flag on purpose: a connection string on the command line
+ends up in your shell history and the process list, and that string holds the
+admin password.
 
 To skip the question, put the URL in a `.env` file in the directory you run
 nellie from:
@@ -80,7 +83,33 @@ DATABASE_URL=postgres://nellie_admin:something-long@localhost:5432/postgres
 ```
 
 Anything already set in your shell wins over `.env`, so a one-off
-`DATABASE_URL=... nellie add-project` still works.
+`DATABASE_URL=... nellie add-project` still works. `PG*` and `SSL_CERT_*`
+variables are ignored in `.env`, with a warning, so a checked-out `.env` can't
+point nellie at another server. Set those in your shell.
+
+One thing to know: `PGPASSWORD` from your shell is used with whatever host the
+connection URL names. If you run nellie in a checkout whose `.env` you don't
+trust, that URL could name another host. Check `.env` first, or keep the
+password out of your shell.
+
+### TLS
+
+The admin connection requires TLS unless the connection string sets `sslmode`.
+Postgres's own default would quietly fall back to plaintext, which would send
+the admin password unencrypted. `sslmode=require` encrypts but doesn't check the
+server's certificate; use `sslmode=verify-full` with a trusted CA for that.
+
+For a local server without TLS, say so explicitly:
+
+```
+DATABASE_URL=postgres://nellie_admin:something-long@localhost:5432/postgres?sslmode=disable
+```
+
+`sslmode=prefer` and an empty `sslmode` are treated the same as `require`: a
+server without TLS is an error, not a silent downgrade. `sslmode=allow` is
+refused, since it tries plaintext first. Unix sockets don't use TLS, so they're
+not affected. The app URLs nellie prints repeat the admin's `sslmode`, so the
+app never connects with weaker TLS.
 
 ## Commands
 
@@ -92,8 +121,10 @@ Asks for a name, then creates:
 - a login role with the same name that owns the database and its public
   schema, and can do everything in it.
 
-`CONNECT` is revoked from `PUBLIC`, so other roles on the server can't wander
-into the enclosure.
+Every privilege is revoked from `PUBLIC` on the new database, so other roles on
+the server can't connect to it or create temporary tables in it. Other databases
+on the server, such as `postgres`, stay open to every role, as in plain
+Postgres; nellie doesn't change them.
 
 Project names are lowercase letters, digits and `_`, start with a letter,
 and are at most 57 characters long, so that every user name nellie suggests
@@ -132,11 +163,10 @@ admin role is a member of the database's owner.
 
 ### Flags
 
-Both commands take the same two flags:
+Both commands take the same flag:
 
 | Flag | |
 | --- | --- |
-| `--dsn <url>` | Admin connection string. Overrides `DATABASE_URL` and friends. |
 | `--dry-run` | Print the SQL instead of running it. Doesn't connect. Passwords show as `<redacted>`. |
 
 Add `-h` to any command for its help text.
@@ -157,6 +187,11 @@ An elephant never forgets. Nellie does, on purpose:
 
 If something fails halfway, nellie cleans up after herself: whatever that
 command had already created gets dropped, so you can just run it again.
+
+If the cleanup fails too (the connection dropped, say), nellie says which role or
+database may be left behind, so you can drop it by hand. That message also
+appears when you stop a command with Ctrl-C partway through and the cleanup
+can't finish; the exit code is still 130.
 
 ## Not yet
 
