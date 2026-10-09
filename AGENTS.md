@@ -13,6 +13,18 @@ data model and safety rules live in [CLAUDE.md](CLAUDE.md); read it first.
 - Don't rewrite or force-push history to add signatures unless asked.
 - Only commit or push when the author asks.
 
+## Merging
+
+- **Squash merge into `main` by default** (`gh pr merge --squash`), without asking
+  which method to use. One PR is one commit, one version and one changelog entry.
+- Exception: if a PR's commits are individually meaningful (a large change built
+  up in many deliberate steps), ask the author before merging. A merge commit
+  keeps that history and the author's own commit signatures.
+- Never rebase merge.
+- Keep branch commits signed either way; a squash commit is signed by GitHub, not
+  by the author.
+- Merge only when the author asks.
+
 ## Changelog and release notes
 
 - Write `CHANGELOG.md` entries in the Toy Dolls voice: silly but competent, in
