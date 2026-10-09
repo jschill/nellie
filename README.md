@@ -44,6 +44,8 @@ Or from a checkout:
 go build -o nellie .
 ```
 
+Check what you got with `nellie --version`.
+
 ## The admin role
 
 nellie connects as an admin role that creates the databases and users. It
