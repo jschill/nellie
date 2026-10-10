@@ -54,7 +54,7 @@ Short, lowercase, verb-noun subcommands:
 nellie add-project     # asks for the name (done)
 nellie add-user        # asks for project and user name (done)
 nellie rotate-password [<user>]   # asks for the user if not given (done)
-nellie list            # alias: nellie trumpet
+nellie list            # alias: nellie trumpet (done)
 ```
 
 `rotate-password` asks for the new password; empty input on a terminal, or
@@ -71,6 +71,14 @@ role except `pg_database_owner`; it warns when the role's `VALID UNTIL` has pass
 be a single line. The URL's database is the longest prefix
 of the role name (cut at `_`, or the whole name) that is an existing database
 the role can connect to; none found means no URL.
+
+`list` shows the databases whose owner's privileges the admin has
+(`pg_has_role(datdba, 'USAGE')`, as in `add-user`; not `'MEMBER'`, which on
+Postgres 16+ also matches the ADMIN-only membership a `CREATEROLE` admin keeps
+in every role it created). Under each come the `LOGIN` roles named
+`<project>_*` that can connect, assigned to the longest matching project;
+those with the owner's privileges are `admin`, the rest `application`. It is
+one query (`pg.ListSQL`, no bind parameters), which `--dry-run` prints.
 
 Common flags, registered on every subcommand's FlagSet: `--dry-run`, and
 `--json` where output is data (e.g. `list`). No `--dsn`: a connection string
