@@ -39,6 +39,7 @@ Commands:
   add-project       create a database and a role with the same name that owns it
   add-user          add a user to a project: application (reads and writes) or admin
   rotate-password   give a user a new password
+  list              list projects and their users (also: trumpet)
 
 Run "nellie <command> -h" for a command's flags.
 Run "nellie --version" for the version.
@@ -95,6 +96,8 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return addUser(args[1:], stdin, stdout, stderr)
 	case "rotate-password":
 		return rotatePassword(args[1:], stdin, stdout, stderr)
+	case "list", "trumpet":
+		return list(args[1:], stdin, stdout, stderr)
 	case "help", "-h", "-help", "--help":
 		fmt.Fprint(stdout, usage)
 		return exitOK

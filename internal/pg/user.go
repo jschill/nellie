@@ -26,6 +26,16 @@ const (
 	adminSuffix = "admin"
 )
 
+// String names the kind as nellie list shows it, also in --json, so the
+// names are a stable interface. Having a String method makes UserKind a
+// fmt.Stringer, so %s and %v print these names instead of 0 and 1.
+func (k UserKind) String() string {
+	if k == AdminUser {
+		return "admin"
+	}
+	return "application"
+}
+
 // DefaultSuffix suggests what comes after "<project>_" in the user's name.
 func (k UserKind) DefaultSuffix() string {
 	if k == AdminUser {

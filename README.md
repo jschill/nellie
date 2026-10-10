@@ -28,6 +28,7 @@ do everything**, and you add more restricted users when you need them.
 
 `add-project` and `add-user` ask for everything interactively, so there are no
 flags to look up; `rotate-password` asks for whatever you don't give it.
+`nellie list` (or `nellie trumpet`) shows what you've got.
 Names are checked as you type, and a bad one never gets anywhere near the
 server.
 
@@ -209,13 +210,37 @@ which it has for every role it created; on Postgres 15 `CREATEROLE` is enough. I
 passed, nellie still sets the password but warns you, since the role can't
 log in until that's cleared.
 
+### `nellie list`
+
+Also known as `nellie trumpet`. Shows every project the admin role can act
+for, with its users:
+
+```
+blog  (owner blog)
+  no users yet; add one with "nellie add-user"
+
+shop  (owner shop)
+  shop_admin  admin
+  shop_app    application  VALID UNTIL has passed, so it can't log in
+```
+
+A project is any database whose owner the admin role is, or whose owner's
+privileges it has through membership (the same rule `add-user` uses), so
+databases nellie didn't create show up too. Its users are the login roles
+named `<project>_<something>` that can connect to it. A user with the owner's
+privileges is an `admin` user; anyone else is an `application` user. When
+project names share a prefix, a user belongs to the longest one, so
+`shop_v2_app` goes under `shop_v2`, not `shop`.
+
+`list` only reads, and never shows passwords or connection URLs.
+
 ### Flags
 
 | Flag | |
 | --- | --- |
-| `--dry-run` | Print the SQL instead of running it. Doesn't connect. Passwords show as `<redacted>`. All commands. |
+| `--dry-run` | Print the SQL instead of running it. Doesn't connect. Passwords show as `<redacted>`. All commands (for `list`, the one query it runs). |
 | `--generate` | Generate the new password without asking. `rotate-password` only. |
-| `--json` | Print the result as JSON: `user`; `database` and `url` when the project database is found; `password` only if nellie generated it. `rotate-password` only, and not together with `--dry-run`. |
+| `--json` | Print the result as JSON, not together with `--dry-run`. `rotate-password`: `user`; `database` and `url` when the project database is found; `password` only if nellie generated it. `list`: an array of `{"project", "owner", "users": [{"name", "type", "expired"}]}`, where `type` is `application` or `admin`. |
 
 Flags can go before or after the user name.
 
@@ -246,10 +271,6 @@ If the cleanup fails too (the connection dropped, say), nellie says which role o
 database may be left behind, so you can drop it by hand. That message also
 appears when you stop a command with Ctrl-C partway through and the cleanup
 can't finish; the exit code is still 130.
-
-## Not yet
-
-- `nellie list`, also known as `nellie trumpet`
 
 ## Development
 
