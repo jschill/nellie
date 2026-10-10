@@ -12,18 +12,22 @@ import (
 	"strings"
 	"text/tabwriter"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/jschill/nellie/internal/pg"
 )
 
-const listHelp = `Lists the projects the admin role can act for: the databases whose owner it
-is, or is a member of. Under each project come its users, the login roles
-named <project>_<something> that can connect to it:
+const listHelp = `Lists the projects the admin role can act for: the databases it owns, or
+whose owner's privileges it has through membership. Under each project come
+its users, the login roles named <project>_<something> that can connect to it:
 
-  application  reads and writes rows
-  admin        has the owner's privileges, so it can do everything
+  application  any other user, such as one made by "nellie add-user"
+               as an application user, which reads and writes rows
+  admin        a member of the owner role, so it has (or can take) the
+               owner's privileges and can do everything
 
-It only reads, and shows no passwords. Also known as "nellie trumpet".
+Superusers and the admin role itself aren't listed as users. It only reads,
+and shows no passwords. Also known as "nellie trumpet".
 `
 
 // listProject and listUser are the --json output. Like rotateResult, the
@@ -50,7 +54,7 @@ func list(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 	if opts.dryRun {
-		fmt.Fprintf(stdout, "-- dry run: nellie list runs this one query, which only reads\n%s;\n", pg.ListSQL)
+		fmt.Fprint(stdout, "-- dry run: nellie list runs this, which only reads\n"+pg.ListScript())
 		return exitOK
 	}
 
@@ -130,9 +134,11 @@ func printList(w io.Writer, projects []pg.ProjectInfo) {
 // printable returns name as is, or quoted with escapes if it holds characters
 // that aren't printable. nellie's own names are always plain, but list also
 // shows databases and roles it didn't create, and a name with control
-// characters could otherwise send escape sequences to the terminal.
+// characters could otherwise send escape sequences to the terminal. Bytes that
+// aren't valid UTF-8 count too: ContainsFunc would read them as U+FFFD, which
+// is printable, and pass on a raw byte such as 0x9b (CSI on some terminals).
 func printable(name string) string {
-	if strings.ContainsFunc(name, func(r rune) bool { return !unicode.IsPrint(r) }) {
+	if !utf8.ValidString(name) || strings.ContainsFunc(name, func(r rune) bool { return !unicode.IsPrint(r) }) {
 		return strconv.Quote(name)
 	}
 	return name

@@ -226,11 +226,14 @@ shop  (owner shop)
 
 A project is any database whose owner the admin role is, or whose owner's
 privileges it has through membership (the same rule `add-user` uses), so
-databases nellie didn't create show up too. Its users are the login roles
-named `<project>_<something>` that can connect to it. A user with the owner's
-privileges is an `admin` user; anyone else is an `application` user. When
-project names share a prefix, a user belongs to the longest one, so
-`shop_v2_app` goes under `shop_v2`, not `shop`.
+databases nellie didn't create show up too. Templates and databases that
+allow no connections are left out. Its users are the login roles named
+`<project>_<something>` that can connect to it. Any member of the owner role
+is an `admin` user, including one that has to `SET ROLE` first to use the
+owner's privileges; anyone else is an `application` user. When project names
+share a prefix, a user belongs to the longest one, so `shop_v2_app` goes
+under `shop_v2`, not `shop`, and the owner `shop_v2` is never a user of
+`shop`. Superusers and the admin role itself aren't listed as users.
 
 `list` only reads, and never shows passwords or connection URLs.
 
@@ -238,7 +241,7 @@ project names share a prefix, a user belongs to the longest one, so
 
 | Flag | |
 | --- | --- |
-| `--dry-run` | Print the SQL instead of running it. Doesn't connect. Passwords show as `<redacted>`. All commands (for `list`, the one query it runs). |
+| `--dry-run` | Print the SQL instead of running it. Doesn't connect. Passwords show as `<redacted>`. All commands (for `list`, the query it runs, after pinning `search_path`). |
 | `--generate` | Generate the new password without asking. `rotate-password` only. |
 | `--json` | Print the result as JSON, not together with `--dry-run`. `rotate-password`: `user`; `database` and `url` when the project database is found; `password` only if nellie generated it. `list`: an array of `{"project", "owner", "users": [{"name", "type", "expired"}]}`, where `type` is `application` or `admin`. |
 

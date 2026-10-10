@@ -9,7 +9,7 @@ import (
 	"github.com/jschill/nellie/internal/pg"
 )
 
-// Value: protects=--dry-run prints the exact query and needs no connection, under both names; fails_when=the trumpet alias is dropped from dispatch, or the dry run connects or prompts; why_new=new code; seam=none
+// Value: protects=--dry-run prints the search_path pin and the exact query, needs no connection, under both names; fails_when=the alias is dropped, the pin is left out, or the dry run connects; why_new=new code; seam=none
 func TestListDryRun(t *testing.T) {
 	clearConnEnv(t)
 	for _, name := range []string{"list", "trumpet"} {
@@ -19,8 +19,10 @@ func TestListDryRun(t *testing.T) {
 			if code := Run([]string{name, "--dry-run"}, strings.NewReader(""), &stdout, &stderr); code != exitOK {
 				t.Fatalf("exit code %d, stderr:\n%s", code, stderr.String())
 			}
-			if !strings.Contains(stdout.String(), pg.ListSQL+";\n") {
-				t.Errorf("dry run doesn't print the query:\n%s", stdout.String())
+			// The search_path pin first: without it the query can run a
+			// function the database's owner planted (TestListProjectsIgnoresShadowedFunctions).
+			if !strings.Contains(stdout.String(), "SET search_path = pg_catalog, pg_temp;\n"+pg.ListSQL+";\n") {
+				t.Errorf("dry run doesn't print the search_path pin and the query:\n%s", stdout.String())
 			}
 		})
 	}
@@ -96,5 +98,68 @@ func TestListJSON(t *testing.T) {
 				t.Errorf("got  %s\nwant %s", got, tt.want)
 			}
 		})
+	}
+}
+
+// Value: protects=no project, owner or user name reaches the terminal with raw control or bidi characters, whichever column it is in; fails_when=printable() is dropped from the project or owner column; why_new=TestPrintList only puts the escape in a user name; seam=none
+func TestPrintListEscapesEveryName(t *testing.T) {
+	// ESC (clears the screen), a newline (forges a line) and U+202E (reverses text).
+	hostile := "x\x1b[2J\n" + string(rune(0x202e))
+	quoted := `"x\x1b[2J\n\` + `u202e"`
+	tests := []struct {
+		name    string
+		project pg.ProjectInfo
+	}{
+		{"project", pg.ProjectInfo{Name: hostile, Owner: "o"}},
+		{"owner", pg.ProjectInfo{Name: "p", Owner: hostile}},
+		{"user", pg.ProjectInfo{Name: "p", Owner: "o", Users: []pg.UserInfo{{Name: hostile}}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var out bytes.Buffer
+			printList(&out, []pg.ProjectInfo{tt.project})
+			got := out.String()
+			if strings.ContainsAny(got, "\x1b"+string(rune(0x202e))) || strings.Contains(got, "x\n") {
+				t.Errorf("raw control characters in the output: %q", got)
+			}
+			if !strings.Contains(got, quoted) {
+				t.Errorf("output lacks the escaped name %s: %q", quoted, got)
+			}
+		})
+	}
+}
+
+// Value: protects=an unreachable server is exit 1 with the error on stderr, never an empty list on stdout, and the admin password isn't echoed; fails_when=the ListProjects error is dropped and list prints "The big top is empty" with exit 0; why_new=only dry runs and usage errors reach list(); seam=none
+func TestListConnectionFailure(t *testing.T) {
+	clearConnEnv(t)
+	const secret = "S3cr3tPW"
+	// Port 1 on loopback: nothing listens there, so the connection is refused at once.
+	t.Setenv("DATABASE_URL", "postgres://admin:"+secret+"@127.0.0.1:1/postgres?sslmode=disable&connect_timeout=5")
+	for _, args := range [][]string{{"list"}, {"list", "--json"}} {
+		var stdout, stderr bytes.Buffer
+		if code := Run(args, strings.NewReader(""), &stdout, &stderr); code != exitError {
+			t.Errorf("%v: exit code %d, want %d; stderr:\n%s", args, code, exitError, stderr.String())
+		}
+		if stdout.Len() > 0 {
+			t.Errorf("%v: stdout should be empty when nothing was listed:\n%s", args, stdout.String())
+		}
+		if !strings.Contains(stderr.String(), "connecting") || strings.Contains(stderr.String(), secret) {
+			t.Errorf("%v: want a connection error without the password, stderr:\n%s", args, stderr.String())
+		}
+	}
+}
+
+// Value: protects=names that aren't valid UTF-8, such as a raw 8-bit CSI byte, are quoted rather than sent to the terminal; fails_when=printable only checks decoded runes, which turn bad bytes into a printable U+FFFD; why_new=only valid UTF-8 was tested; seam=none
+func TestPrintable(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{"shop_app", "shop_app"},
+		{"smörgås", "smörgås"},
+		{"a\x9bb", `"a\x9bb"`},
+		{"a\xffb", `"a\xffb"`},
+	}
+	for _, tt := range tests {
+		if got := printable(tt.in); got != tt.want {
+			t.Errorf("printable(%q) = %s, want %s", tt.in, got, tt.want)
+		}
 	}
 }

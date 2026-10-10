@@ -45,7 +45,8 @@ Run "nellie <command> -h" for a command's flags.
 Run "nellie --version" for the version.
 `
 
-// dryRunNote heads every --dry-run script. The password is redacted, so piping
+// dryRunNote heads every --dry-run script that sets a password (list prints
+// its own header, having none). The password is redacted, so piping
 // the script to psql would create a role whose password is the text "<redacted>".
 const dryRunNote = "-- dry run: the password is redacted, so this script is not meant to be run as is\n"
 

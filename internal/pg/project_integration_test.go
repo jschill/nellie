@@ -68,6 +68,7 @@ func sweep(dsn string) {
 			}
 		}
 		exec("GRANT " + ident(d.owner) + " TO " + ident(me))
+		exec("ALTER DATABASE " + ident(d.db) + " IS_TEMPLATE false") // a template can't be dropped
 		exec("DROP DATABASE IF EXISTS " + ident(d.db))
 	}
 
