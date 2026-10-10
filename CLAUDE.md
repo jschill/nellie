@@ -67,22 +67,33 @@ user must be the argument and the admin connection must come from the
 environment, else exit 2. It refuses roles that don't exist, can't log in,
 are superusers, are the admin itself, have `CREATEROLE`, `REPLICATION` or
 `BYPASSRLS`, or are members of a role that has, or of any predefined `pg_*`
-role except `pg_database_owner`; it warns when the role's `VALID UNTIL` has passed. Piped input must
+role except `pg_database_owner` (`list` shows those as `privileged`); it warns when the role's `VALID UNTIL` has passed. Piped input must
 be a single line. The URL's database is the longest prefix
 of the role name (cut at `_`, or the whole name) that is an existing database
 the role can connect to; none found means no URL.
 
-`list` shows the non-template databases that allow connections and whose
-owner's privileges the admin has (`pg_has_role(datdba, 'USAGE')`, as in
-`add-user`; not `'MEMBER'`, which on Postgres 16+ also matches the ADMIN-only
-membership a `CREATEROLE` admin keeps in every role it created). Under each
-come the `LOGIN` roles named `<project>_*` that can connect, assigned to the
-longest matching project by `rotate-password`'s rule, so a project's owner is
-never another project's user. Superusers and the admin itself are left out.
-Users classify by `'MEMBER'` of the owner, on purpose: a NOINHERIT member can
-still `SET ROLE` to it, so it's `admin`; the rest are `application`. It is one
-query (`pg.ListSQL`, no bind parameters) after the `search_path` pin, and
-`--dry-run` prints both (`pg.ListScript`).
+`list` shows the databases whose owner's privileges the admin has
+(`pg_has_role(datdba, 'USAGE')`, as in `add-user`; not `'MEMBER'`, which on
+Postgres 16+ also matches the ADMIN-only membership a `CREATEROLE` admin keeps
+in every role it created). Templates and databases closed to connections stay
+in: the owner controls both settings, so filtering on them lets it hide a
+project. Under each come the `LOGIN` roles named `<project>_*` that can
+connect or are members of the owner (the owner controls CONNECT too),
+assigned to the longest matching database among all of them, as
+`rotate-password` does, so a role of a project the admin can't see doesn't
+fall through to a shorter one. The owner (by OID) and the admin itself are
+never users. Types: `admin` is `'MEMBER'` of the owner, on purpose (a
+NOINHERIT member can still `SET ROLE` to it); `privileged` has what
+`rotate-password` refuses (superuser, `CREATEROLE`, `REPLICATION`,
+`BYPASSRLS`, or membership in a role with those or in a `pg_*` role), shown
+in human output; the rest are `application`. It runs `pg.ListSQL` (one query,
+no bind parameters) after `pinSession` and the version check; `--dry-run`
+prints the pin and the query (`pg.ListScript`).
+
+`pinSession` (sql.go) starts every catalog-reading admin connection
+(`rotate-password`, `list`): it pins `search_path` and refuses a connection
+database with a database-wide `role` setting, which its owner controls. The
+admin's own `ALTER ROLE ... SET role` keeps working.
 
 Common flags, registered on every subcommand's FlagSet: `--dry-run`, and
 `--json` where output is data (e.g. `list`). No `--dsn`: a connection string

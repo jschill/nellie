@@ -25,9 +25,12 @@ its users, the login roles named <project>_<something> that can connect to it:
                as an application user, which reads and writes rows
   admin        a member of the owner role, so it has (or can take) the
                owner's privileges and can do everything
+  privileged   has powers beyond the project, shown next to it: SUPERUSER,
+               CREATEROLE, REPLICATION, BYPASSRLS, or membership in a role
+               that has them or in a predefined pg_* role
 
-Superusers and the admin role itself aren't listed as users. It only reads,
-and shows no passwords. Also known as "nellie trumpet".
+The admin role itself isn't listed as a user. It only reads, and shows no
+passwords. Also known as "nellie trumpet".
 `
 
 // listProject and listUser are the --json output. Like rotateResult, the
@@ -40,7 +43,7 @@ type listProject struct {
 
 type listUser struct {
 	Name    string `json:"name"`
-	Type    string `json:"type"`    // "application" or "admin"
+	Type    string `json:"type"`    // "application", "admin" or "privileged"
 	Expired bool   `json:"expired"` // VALID UNTIL has passed
 }
 
@@ -54,7 +57,7 @@ func list(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 	if opts.dryRun {
-		fmt.Fprint(stdout, "-- dry run: nellie list runs this, which only reads\n"+pg.ListScript())
+		fmt.Fprint(stdout, "-- dry run: what nellie list runs after checking the server version and the session's role; it only reads\n"+pg.ListScript())
 		return exitOK
 	}
 
@@ -94,11 +97,20 @@ func listJSON(projects []pg.ProjectInfo) []listProject {
 	for _, p := range projects {
 		lp := listProject{Project: p.Name, Owner: p.Owner, Users: make([]listUser, 0, len(p.Users))}
 		for _, u := range p.Users {
-			lp.Users = append(lp.Users, listUser{Name: u.Name, Type: u.Kind.String(), Expired: u.Expired})
+			lp.Users = append(lp.Users, listUser{Name: u.Name, Type: userType(u), Expired: u.Expired})
 		}
 		res = append(res, lp)
 	}
 	return res
+}
+
+// userType names a user's type for both outputs: "privileged" when it has
+// powers beyond the project, whatever its membership, else its kind.
+func userType(u pg.UserInfo) string {
+	if u.Powers != "" {
+		return "privileged"
+	}
+	return u.Kind.String()
 }
 
 // printList writes the human output: each project with its owner, then its
@@ -120,10 +132,16 @@ func printList(w io.Writer, projects []pg.ProjectInfo) {
 			fmt.Fprintln(tw, `  no users yet; add one with "nellie add-user"`)
 		}
 		for _, u := range p.Users {
-			// u.Kind prints as "admin" or "application" through its String method.
-			fmt.Fprintf(tw, "  %s\t%s", printable(u.Name), u.Kind)
+			fmt.Fprintf(tw, "  %s\t%s", printable(u.Name), userType(u))
+			var notes []string
+			if u.Powers != "" {
+				notes = append(notes, printable(u.Powers))
+			}
 			if u.Expired {
-				fmt.Fprint(tw, "\tVALID UNTIL has passed, so it can't log in")
+				notes = append(notes, "VALID UNTIL has passed, so it can't log in")
+			}
+			if len(notes) > 0 {
+				fmt.Fprint(tw, "\t"+strings.Join(notes, "; "))
 			}
 			fmt.Fprintln(tw)
 		}

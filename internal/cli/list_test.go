@@ -42,7 +42,7 @@ func TestListUsageErrors(t *testing.T) {
 	}
 }
 
-// Value: protects=the human output lines up each project's users, marks expired roles, says when there are no users, and escapes names with control characters; fails_when=the layout changes, an empty note column adds trailing spaces, or a raw escape sequence reaches the terminal; why_new=new code; seam=none
+// Value: protects=the human output aligns users, shows powers and expiry notes, says when there are no users, and escapes control characters; fails_when=the layout changes, an empty note column adds trailing spaces, or a raw escape sequence reaches the terminal; why_new=new code; seam=none
 func TestPrintList(t *testing.T) {
 	var out bytes.Buffer
 	printList(&out, []pg.ProjectInfo{
@@ -50,6 +50,7 @@ func TestPrintList(t *testing.T) {
 		{Name: "shop", Owner: "alice", Users: []pg.UserInfo{
 			{Name: "shop_admin", Kind: pg.AdminUser},
 			{Name: "shop_app", Kind: pg.AppUser, Expired: true},
+			{Name: "shop_boss", Kind: pg.AdminUser, Powers: "CREATEROLE, member of pg_monitor", Expired: true},
 			{Name: "shop_\x1b[2J", Kind: pg.AppUser},
 		}},
 	})
@@ -59,6 +60,7 @@ func TestPrintList(t *testing.T) {
 shop  (owner alice)
   shop_admin      admin
   shop_app        application  VALID UNTIL has passed, so it can't log in
+  shop_boss       privileged   CREATEROLE, member of pg_monitor; VALID UNTIL has passed, so it can't log in
   "shop_\x1b[2J"  application
 `
 	if out.String() != want {
@@ -72,7 +74,7 @@ shop  (owner alice)
 	}
 }
 
-// Value: protects=the --json shape scripts rely on: field names, type names, and [] rather than null for no projects or no users; fails_when=a tag or a UserKind name changes, or a nil slice reaches the encoder; why_new=new code; seam=none
+// Value: protects=the --json shape scripts rely on: field names, the three type names, [] rather than null; fails_when=a tag or type name changes, privileged loses to the kind, or a nil slice reaches the encoder; why_new=new code; seam=none
 func TestListJSON(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -84,9 +86,11 @@ func TestListJSON(t *testing.T) {
 		{"users", []pg.ProjectInfo{{Name: "shop", Owner: "shop", Users: []pg.UserInfo{
 			{Name: "shop_admin", Kind: pg.AdminUser},
 			{Name: "shop_app", Kind: pg.AppUser, Expired: true},
+			{Name: "shop_boss", Kind: pg.AdminUser, Powers: "CREATEROLE"},
 		}}}, `[{"project":"shop","owner":"shop","users":[` +
 			`{"name":"shop_admin","type":"admin","expired":false},` +
-			`{"name":"shop_app","type":"application","expired":true}]}]`},
+			`{"name":"shop_app","type":"application","expired":true},` +
+			`{"name":"shop_boss","type":"privileged","expired":false}]}]`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

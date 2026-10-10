@@ -7,11 +7,6 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// pinSearchPath runs before ListSQL. The query uses catalogs and functions by
-// unqualified name, which the owner of the connection database could shadow
-// through its search_path (see RotatePassword).
-const pinSearchPath = "SET search_path = pg_catalog, pg_temp"
-
 // ListSQL is the query behind nellie list. It has no bind parameters, so
 // --dry-run can print exactly what runs (see ListScript).
 //
@@ -19,42 +14,64 @@ const pinSearchPath = "SET search_path = pg_catalog, pg_temp"
 // membership or by owning them directly: the same check as add-user. Not
 // 'MEMBER': on Postgres 16+ a CREATEROLE admin keeps an ADMIN-only membership
 // in every role it created, which counts as MEMBER but can't act as the role.
-// Templates, databases that allow no connections and invalid ones
-// (datconnlimit -2, a DROP DATABASE that was interrupted) are left out.
+// Templates and databases that allow no connections are kept on purpose:
+// their owner can switch either setting, so filtering on them would let the
+// owner hide a project. Left out are invalid ones (datconnlimit -2, an
+// interrupted DROP DATABASE) and, by name, Postgres's own template0 and
+// template1, which a superuser admin would otherwise see as projects.
 //
-// users: login roles that can connect to the project, named <project>_<something>.
-// A role that matches several projects belongs to the longest one, and a role
-// named like a project belongs to that project, as in rotate-password's
-// projectCandidates: DISTINCT ON keeps the first row per role, and the
-// ORDER BY puts the longest project name first. That project's owner is
-// shown as the owner, so the outer WHERE drops it from the users. Superusers
-// and the admin role itself are no project's users, so they're left out.
+// users: login roles named <project>_<something> (or exactly like a database,
+// as in rotate-password's projectCandidates) that can connect to it or are a
+// member of its owner; the owner controls CONNECT, so CONNECT alone would let
+// it hide its admin users. A role belongs to the longest matching database,
+// searched among all of them: DISTINCT ON keeps the first row per role, and
+// the ORDER BY puts the longest database name first. Only then are roles
+// whose database isn't one of the projects dropped (by the LEFT JOIN), so a
+// role of a project the admin can't see doesn't fall through to a shorter
+// one. The owner is shown as the owner, so the outer WHERE drops it, by OID,
+// from the users. The admin role itself is no project's user.
 //
 // Any member of the owner is an admin user (see User.Plan), here 'MEMBER' on
-// purpose: a NOINHERIT member doesn't use the owner's privileges directly,
-// but can SET ROLE to the owner whenever it likes.
+// purpose, erring towards admin: a NOINHERIT member doesn't use the owner's
+// privileges directly but can SET ROLE to the owner, and the rare Postgres 16+
+// grant with neither INHERIT nor SET still ties the role to the owner.
+//
+// powers lists what makes a user privileged, the same things rotate-password
+// refuses: SUPERUSER, CREATEROLE, REPLICATION, BYPASSRLS, and membership in a
+// role that has them or in a predefined pg_* role (except pg_database_owner).
 //
 // The LEFT JOIN keeps projects without users, as a row with empty user columns.
 const ListSQL = `WITH projects AS (
 	SELECT oid, datname, datdba FROM pg_database
-	WHERE NOT datistemplate AND datallowconn AND datconnlimit <> -2
+	WHERE datconnlimit <> -2 AND datname NOT IN ('template0', 'template1')
 		AND pg_has_role(datdba, 'USAGE')
 ), users AS (
-	SELECT project, rolname, admin, expired FROM (
-		SELECT DISTINCT ON (r.rolname) p.oid AS project, p.datname, r.rolname,
-			pg_has_role(r.oid, p.datdba, 'MEMBER') AS admin,
+	SELECT project, rolname, admin, powers, expired FROM (
+		SELECT DISTINCT ON (r.rolname) d.oid AS project, d.datdba, r.oid AS role, r.rolname,
+			pg_has_role(r.oid, d.datdba, 'MEMBER') AS admin,
+			concat_ws(', ',
+				CASE WHEN r.rolsuper THEN 'SUPERUSER' END,
+				CASE WHEN r.rolcreaterole THEN 'CREATEROLE' END,
+				CASE WHEN r.rolreplication THEN 'REPLICATION' END,
+				CASE WHEN r.rolbypassrls THEN 'BYPASSRLS' END,
+				(SELECT 'member of ' || string_agg(g.rolname, ', ' ORDER BY g.rolname) FROM pg_roles g
+					WHERE NOT r.rolsuper -- a superuser is a member of every role
+						AND g.oid <> r.oid AND pg_has_role(r.oid, g.oid, 'MEMBER')
+						AND (g.rolsuper OR g.rolcreaterole OR g.rolreplication OR g.rolbypassrls
+							OR (starts_with(g.rolname, 'pg_') AND g.rolname <> 'pg_database_owner')))
+			) AS powers,
 			coalesce(r.rolvaliduntil < now(), false) AS expired
 		FROM pg_roles r
-		JOIN projects p ON r.rolname = p.datname OR starts_with(r.rolname, p.datname || '_')
-		WHERE r.rolcanlogin AND NOT r.rolsuper
+		JOIN pg_database d ON r.rolname = d.datname OR starts_with(r.rolname, d.datname || '_')
+		WHERE r.rolcanlogin AND d.datconnlimit <> -2
 			AND r.rolname NOT IN (current_user, session_user)
-			AND has_database_privilege(r.oid, p.oid, 'CONNECT')
-		ORDER BY r.rolname, length(p.datname) DESC
+			AND (has_database_privilege(r.oid, d.oid, 'CONNECT') OR pg_has_role(r.oid, d.datdba, 'MEMBER'))
+		ORDER BY r.rolname, length(d.datname) DESC
 	) matched
-	WHERE rolname <> datname
+	WHERE role <> datdba
 )
-SELECT p.datname, pg_get_userbyid(p.datdba),
-	coalesce(u.rolname, ''), coalesce(u.admin, false), coalesce(u.expired, false)
+SELECT p.datname, pg_get_userbyid(p.datdba), coalesce(u.rolname, ''),
+	coalesce(u.admin, false), coalesce(u.powers, ''), coalesce(u.expired, false)
 FROM projects p LEFT JOIN users u ON u.project = p.oid
 ORDER BY p.datname, u.rolname`
 
@@ -74,6 +91,9 @@ type ProjectInfo struct {
 type UserInfo struct {
 	Name string
 	Kind UserKind
+	// Powers is what makes the user privileged, such as "CREATEROLE" or
+	// "member of pg_monitor", or "" for none.
+	Powers string
 	// Expired means the role's VALID UNTIL has passed, so it can't log in.
 	Expired bool
 }
@@ -87,8 +107,8 @@ func ListProjects(ctx context.Context, cfg *pgx.ConnConfig) ([]ProjectInfo, erro
 	}
 	defer conn.Close(context.Background())
 
-	if _, err := conn.Exec(ctx, pinSearchPath); err != nil {
-		return nil, fmt.Errorf("setting search_path: %w", err)
+	if err := pinSession(ctx, conn); err != nil {
+		return nil, err
 	}
 	if err := checkServerVersion(ctx, conn); err != nil {
 		return nil, err
@@ -102,9 +122,9 @@ func ListProjects(ctx context.Context, cfg *pgx.ConnConfig) ([]ProjectInfo, erro
 
 	var projects []ProjectInfo
 	for rows.Next() {
-		var db, owner, user string
+		var db, owner, user, powers string
 		var admin, expired bool
-		if err := rows.Scan(&db, &owner, &user, &admin, &expired); err != nil {
+		if err := rows.Scan(&db, &owner, &user, &admin, &powers, &expired); err != nil {
 			return nil, fmt.Errorf("listing projects: %w", err)
 		}
 		// Rows come sorted by project, so a new name starts a new project.
@@ -119,7 +139,7 @@ func ListProjects(ctx context.Context, cfg *pgx.ConnConfig) ([]ProjectInfo, erro
 			kind = AdminUser
 		}
 		p := &projects[len(projects)-1]
-		p.Users = append(p.Users, UserInfo{Name: user, Kind: kind, Expired: expired})
+		p.Users = append(p.Users, UserInfo{Name: user, Kind: kind, Powers: powers, Expired: expired})
 	}
 	// rows.Next returns false on errors too, not only at the end.
 	if err := rows.Err(); err != nil {

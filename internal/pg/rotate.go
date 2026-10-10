@@ -52,11 +52,9 @@ func RotatePassword(ctx context.Context, cfg *pgx.ConnConfig, role, password str
 	}
 	defer admin.Close(context.Background())
 
-	// The safety checks below read catalogs and use operators by unqualified
-	// name. A database owner can set its database's search_path to put their
-	// own schema first, and fake pg_roles (or "=") for whoever connects there.
-	if _, err := admin.Exec(ctx, "SET search_path = pg_catalog, pg_temp"); err != nil {
-		return Rotation{}, fmt.Errorf("setting search_path: %w", err)
+	// The safety checks below read catalogs and use operators by unqualified name.
+	if err := pinSession(ctx, admin); err != nil {
+		return Rotation{}, err
 	}
 	if err := checkServerVersion(ctx, admin); err != nil {
 		return Rotation{}, err
