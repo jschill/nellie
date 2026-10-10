@@ -120,7 +120,7 @@ func TestRotatePasswordRefuses(t *testing.T) {
 	}
 }
 
-// Value: protects=rotating a role whose VALID UNTIL has passed is reported, since the new password still can't log in; fails_when=the expiry check is dropped and nellie reports plain success for a locked-out role; why_new=new check; seam=none
+// Value: protects=rotating a role whose VALID UNTIL has passed is reported, since the new password won't work until it's cleared; fails_when=the expiry check is dropped and nellie reports plain success; why_new=new check; seam=none
 func TestRotatePasswordReportsExpiry(t *testing.T) {
 	ctx := context.Background()
 	cfg := adminConfig(t)

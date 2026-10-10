@@ -207,8 +207,8 @@ or through membership in another role, and members of any predefined `pg_*`
 role (other than `pg_database_owner`). Use `psql`'s `\password` for those.
 On Postgres 16 and later the admin also needs `ADMIN OPTION` on the role,
 which it has for every role it created; on Postgres 15 `CREATEROLE` is enough. If the role's `VALID UNTIL` has already
-passed, nellie still sets the password but warns you, since the role can't
-log in until that's cleared.
+passed, nellie still sets the password but warns you, since `VALID UNTIL`
+expires the password: the new one won't work until that's cleared.
 
 `rotate-password` and `list` also refuse a session that acts as a role other
 than the admin, unless the admin's own settings say so (`ALTER ROLE ... SET
@@ -227,7 +227,7 @@ blog  (owner blog)
 
 shop  (owner shop)
   shop_admin  admin
-  shop_app    application  VALID UNTIL has passed, so it can't log in
+  shop_app    application  password expired (VALID UNTIL)
 ```
 
 A project is any database whose owner the admin role is, or whose owner's
@@ -240,16 +240,17 @@ Its users are the login roles named `<project>_<something>`. Names alone
 decide where a role goes: the longest database its name matches, so
 `shop_v2_app` goes under `shop_v2`, not `shop`. Who may connect is up to each
 database's owner, so it doesn't move roles around. A role that can't connect
-is listed with a `can't connect` note instead. A role whose database the admin
+is listed with a `can't connect` note instead, which also covers databases
+closed to connections. A role whose database the admin
 can't see isn't listed at all. A project's owner is shown as its owner, never
 as a user, and the admin role itself isn't listed. There are three types:
 
 - `admin`: a member of the owner role, including one that has to
   `SET ROLE` first to use the owner's privileges.
 - `privileged`: a role with powers beyond the project, shown next to it:
-  `SUPERUSER`, `CREATEROLE`, `REPLICATION`, `BYPASSRLS`, or membership in a
-  role that has them, in a predefined `pg_*` role, or in the owner of another
-  database.
+  `SUPERUSER`, `CREATEROLE`, `REPLICATION`, `BYPASSRLS`, membership in a
+  role that has them or in a predefined `pg_*` role, or owning another
+  database (directly or through membership in its owner).
 - `application`: anyone else.
 
 `list` only reads, and never shows passwords or connection URLs.

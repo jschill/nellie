@@ -28,8 +28,8 @@ longest database its name matches, and a note says when it can't connect:
                owner's privileges and can do everything
   privileged   has powers beyond the project, shown next to it: SUPERUSER,
                CREATEROLE, REPLICATION, BYPASSRLS, or membership in a role
-               that has them, in a predefined pg_* role, or in the owner of
-               another database
+               that has them, in a predefined pg_* role, or owning another
+               database or membership in its owner
 
 The admin role itself isn't listed as a user. It only reads, and shows no
 passwords. Also known as "nellie trumpet".
@@ -48,7 +48,7 @@ type listUser struct {
 	Type       string `json:"type"`        // "application", "admin" or "privileged"
 	Powers     string `json:"powers"`      // why it's privileged, "" if it isn't
 	CanConnect bool   `json:"can_connect"` // may connect to the project's database
-	Expired    bool   `json:"expired"`     // VALID UNTIL has passed
+	Expired    bool   `json:"expired"`     // VALID UNTIL has passed: the password no longer works
 }
 
 func list(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
@@ -145,7 +145,7 @@ func printList(w io.Writer, projects []pg.ProjectInfo) {
 				notes = append(notes, "can't connect")
 			}
 			if u.Expired {
-				notes = append(notes, "VALID UNTIL has passed, so it can't log in")
+				notes = append(notes, "password expired (VALID UNTIL)")
 			}
 			if len(notes) > 0 {
 				fmt.Fprint(tw, "\t"+strings.Join(notes, "; "))

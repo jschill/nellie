@@ -59,8 +59,8 @@ func TestPrintList(t *testing.T) {
 
 shop  (owner alice)
   shop_admin      admin
-  shop_app        application  VALID UNTIL has passed, so it can't log in
-  shop_boss       privileged   CREATEROLE, member of pg_monitor; can't connect; VALID UNTIL has passed, so it can't log in
+  shop_app        application  password expired (VALID UNTIL)
+  shop_boss       privileged   CREATEROLE, member of pg_monitor; can't connect; password expired (VALID UNTIL)
   "shop_\x1b[2J"  application
 `
 	if out.String() != want {

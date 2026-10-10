@@ -85,8 +85,9 @@ JSC-3). A role that can't connect gets a `can_connect: false` note; a role
 whose database isn't visible isn't listed. The owner (by OID) and the admin
 itself are never users. Types: `admin` is `'MEMBER'` of the owner, on purpose
 (a NOINHERIT member can still `SET ROLE` to it); `privileged` has what
-`rotate-password` refuses, or membership in another database's owner, listed
-in `powers`; the rest are `application`. It runs `pg.ListSQL` (one query, no
+`rotate-password` refuses, or owns another database (directly or through
+membership; compare database OIDs, not owner OIDs), listed in `powers`;
+`can_connect` needs `datallowconn` as well as CONNECT; the rest are `application`. It runs `pg.ListSQL` (one query, no
 bind parameters) after `pinSession` and the version check; `--dry-run` prints
 the pin and the query (`pg.ListScript`).
 

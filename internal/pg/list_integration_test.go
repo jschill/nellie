@@ -140,6 +140,22 @@ func TestListProjects(t *testing.T) {
 	})
 	mustExec(t, admin, "CREATE ROLE "+ident(x)+" LOGIN")
 	mustExec(t, admin, "GRANT "+ident(xOwner)+" TO "+ident(x))
+	// x's owner also owns another database, so x's membership reaches beyond
+	// its project; and blogger owns a database of its own.
+	x2, blog, blogger := "nellie_it_"+strings.ToLower(rand.Text()[:8]), "nellie_it_"+strings.ToLower(rand.Text()[:8]), p.Name+"_blogger"
+	*dropUsers = append(*dropUsers, blogger)
+	mustExec(t, admin, "CREATE DATABASE "+ident(x2)+" OWNER "+ident(xOwner))
+	mustExec(t, admin, "CREATE ROLE "+ident(blogger)+" LOGIN")
+	mustExec(t, admin, "GRANT "+ident(blogger)+" TO "+ident(cfg.User))
+	mustExec(t, admin, "CREATE DATABASE "+ident(blog)+" OWNER "+ident(blogger))
+	mustExec(t, admin, "GRANT CONNECT ON DATABASE "+ident(p.Name)+" TO "+ident(blogger))
+	t.Cleanup(func() {
+		for _, db := range []string{x2, blog} {
+			if _, err := admin.Exec(context.Background(), "DROP DATABASE IF EXISTS "+ident(db)); err != nil {
+				t.Errorf("dropping %s: %v", db, err)
+			}
+		}
+	})
 
 	// Named like users of p: one can't connect, so it's listed with a note;
 	// one can't log in, so it's no user at all.
@@ -189,6 +205,10 @@ func TestListProjects(t *testing.T) {
 	})
 	mustExec(t, admin, "ALTER DATABASE "+ident(template)+" IS_TEMPLATE true")
 	mustExec(t, admin, "CREATE DATABASE "+ident(closed)+" ALLOW_CONNECTIONS false")
+	// Its user has CONNECT (PUBLIC's default), but nobody can connect.
+	closedApp := closed + "_app"
+	*dropUsers = append(*dropUsers, closedApp)
+	mustExec(t, admin, "CREATE ROLE "+ident(closedApp)+" LOGIN")
 	t.Cleanup(func() {
 		if _, err := admin.Exec(context.Background(), "DROP DATABASE IF EXISTS "+ident(closed)); err != nil {
 			t.Errorf("dropping %s: %v", closed, err)
@@ -227,6 +247,7 @@ func TestListProjects(t *testing.T) {
 		p.Name: {Name: p.Name, Owner: p.Name, Users: []UserInfo{
 			{Name: p.Name + "_admin", Kind: AdminUser, CanConnect: true},
 			{Name: p.Name + "_app", Kind: AppUser, CanConnect: true},
+			{Name: p.Name + "_blogger", Kind: AppUser, Powers: "owner of " + blog, CanConnect: true},
 			{Name: p.Name + "_boss", Kind: AppUser, Powers: "CREATEROLE", CanConnect: true},
 			{Name: p.Name + "_cross", Kind: AppUser, Powers: "member of " + v2.Name, CanConnect: true},
 			{Name: p.Name + "_deputy", Kind: AppUser, Powers: "member of " + boss, CanConnect: true},
@@ -240,7 +261,10 @@ func TestListProjects(t *testing.T) {
 			{Name: v2.Name + "_other", Kind: AppUser},
 		}},
 		x: {Name: x, Owner: xOwner, Users: []UserInfo{
-			{Name: x, Kind: AdminUser, CanConnect: true},
+			{Name: x, Kind: AdminUser, Powers: "member of " + xOwner, CanConnect: true},
+		}},
+		closed: {Name: closed, Owner: cfg.User, Users: []UserInfo{
+			{Name: closedApp, Kind: AppUser},
 		}},
 	}
 	for name, w := range want {

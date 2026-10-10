@@ -32,7 +32,7 @@ type Rotation struct {
 	// if none was found (see projectCandidates).
 	Database string
 	// Expired means the role's VALID UNTIL has passed. A new password doesn't
-	// change that, so the role still can't log in.
+	// change that, so the new password won't work either.
 	Expired bool
 }
 

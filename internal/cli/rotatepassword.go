@@ -125,7 +125,7 @@ func rotatePassword(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 		res.URL = connURL(cfg, user, shown, rot.Database)
 	}
 	if rot.Expired {
-		fmt.Fprintf(stderr, "nellie: warning: the VALID UNTIL of role %s has passed, so it still can't log in; "+
+		fmt.Fprintf(stderr, "nellie: warning: the VALID UNTIL of role %s has passed, so its new password won't work either; "+
 			"clear it with %s\n", user, pg.ClearExpirySQL(user))
 	}
 

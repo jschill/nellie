@@ -39,7 +39,12 @@ import (
 // powers lists what makes a user privileged: what rotate-password refuses
 // (SUPERUSER, CREATEROLE, REPLICATION, BYPASSRLS, membership in a role that
 // has them or in a predefined pg_* role except pg_database_owner), plus
-// membership in the owner of another database, which gives that project too.
+// owning another database, or membership in a role that owns one, which
+// gives that project too. "Another" compares databases, not owners: the
+// project's own owner may own a second database as well.
+//
+// can_connect needs the database to allow connections (datallowconn) as
+// well as CONNECT, since the privilege alone ignores that setting.
 //
 // The LEFT JOIN keeps projects without users, as a row with empty user columns.
 const ListSQL = `WITH projects AS (
@@ -49,18 +54,20 @@ const ListSQL = `WITH projects AS (
 ), users AS (
 	SELECT DISTINCT ON (r.rolname) d.oid AS project, r.oid AS role, r.rolname,
 		pg_has_role(r.oid, d.datdba, 'MEMBER') AS admin,
-		has_database_privilege(r.oid, d.oid, 'CONNECT') AS can_connect,
+		d.datallowconn AND has_database_privilege(r.oid, d.oid, 'CONNECT') AS can_connect,
 		concat_ws(', ',
 			CASE WHEN r.rolsuper THEN 'SUPERUSER' END,
 			CASE WHEN r.rolcreaterole THEN 'CREATEROLE' END,
 			CASE WHEN r.rolreplication THEN 'REPLICATION' END,
 			CASE WHEN r.rolbypassrls THEN 'BYPASSRLS' END,
+			(SELECT 'owner of ' || string_agg(o.datname, ', ' ORDER BY o.datname) FROM pg_database o
+				WHERE o.datdba = r.oid AND o.oid <> d.oid),
 			(SELECT 'member of ' || string_agg(g.rolname, ', ' ORDER BY g.rolname) FROM pg_roles g
 				WHERE NOT r.rolsuper -- a superuser is a member of every role
 					AND g.oid <> r.oid AND pg_has_role(r.oid, g.oid, 'MEMBER')
 					AND (g.rolsuper OR g.rolcreaterole OR g.rolreplication OR g.rolbypassrls
 						OR (starts_with(g.rolname, 'pg_') AND g.rolname <> 'pg_database_owner')
-						OR g.oid IN (SELECT datdba FROM pg_database WHERE datdba <> d.datdba)))
+						OR g.oid IN (SELECT datdba FROM pg_database WHERE oid <> d.oid)))
 		) AS powers,
 		coalesce(r.rolvaliduntil < now(), false) AS expired
 	FROM pg_roles r
@@ -96,7 +103,8 @@ type UserInfo struct {
 	// CanConnect is whether the role may connect to the project's database.
 	// A role that can't is still listed: who may connect is up to the owner.
 	CanConnect bool
-	// Expired means the role's VALID UNTIL has passed, so it can't log in.
+	// Expired means the role's VALID UNTIL has passed, so its password no
+	// longer works; methods without a password (peer, cert) still do.
 	Expired bool
 }
 
