@@ -210,10 +210,11 @@ which it has for every role it created; on Postgres 15 `CREATEROLE` is enough. I
 passed, nellie still sets the password but warns you, since the role can't
 log in until that's cleared.
 
-`rotate-password` and `list` also refuse a connection database whose owner
-made every session act as another role (`ALTER DATABASE ... SET role`), since
-nellie would then see and do only what that role can. Connect the admin to
-another database, such as `postgres`.
+`rotate-password` and `list` also refuse a session that acts as a role other
+than the admin, unless the admin's own settings say so (`ALTER ROLE ... SET
+role`). A database's owner can set a role for every session there (`ALTER
+DATABASE ... SET role`), and nellie would then see and do only what that role
+can. Connect the admin to another database, such as `postgres`.
 
 ### `nellie list`
 
@@ -231,25 +232,25 @@ shop  (owner shop)
 
 A project is any database whose owner the admin role is, or whose owner's
 privileges it has through membership (the same rule `add-user` uses), so
-databases nellie didn't create show up too, templates and databases closed to
-connections included: their owner can switch those settings, so they can't
-be used to hide a project. Its users are the login roles named
-`<project>_<something>` that can connect to it or are members of its owner
-(the owner decides who may connect, so it can't hide its admin users that
-way either). There are three types:
+databases nellie didn't create show up too. Templates and databases closed to
+connections are included, since their owner can switch those settings; only
+Postgres's own `template0` and `template1` are left out.
+
+Its users are the login roles named `<project>_<something>`. Names alone
+decide where a role goes: the longest database its name matches, so
+`shop_v2_app` goes under `shop_v2`, not `shop`. Who may connect is up to each
+database's owner, so it doesn't move roles around. A role that can't connect
+is listed with a `can't connect` note instead. A role whose database the admin
+can't see isn't listed at all. A project's owner is shown as its owner, never
+as a user, and the admin role itself isn't listed. There are three types:
 
 - `admin`: a member of the owner role, including one that has to
   `SET ROLE` first to use the owner's privileges.
 - `privileged`: a role with powers beyond the project, shown next to it:
   `SUPERUSER`, `CREATEROLE`, `REPLICATION`, `BYPASSRLS`, or membership in a
-  role that has them or in a predefined `pg_*` role. The same roles
-  `rotate-password` refuses.
+  role that has them, in a predefined `pg_*` role, or in the owner of another
+  database.
 - `application`: anyone else.
-
-When names share a prefix, a user belongs to the longest matching database,
-so `shop_v2_app` goes under `shop_v2`, not `shop`, even when the admin can't
-see `shop_v2`. A project's owner is shown as its owner, never as a user. The
-admin role itself isn't listed.
 
 `list` only reads, and never shows passwords or connection URLs.
 
@@ -259,7 +260,7 @@ admin role itself isn't listed.
 | --- | --- |
 | `--dry-run` | Print the SQL instead of running it. Doesn't connect. Passwords show as `<redacted>`. All commands (for `list`, the query it runs, after pinning `search_path`). |
 | `--generate` | Generate the new password without asking. `rotate-password` only. |
-| `--json` | Print the result as JSON, not together with `--dry-run`. `rotate-password`: `user`; `database` and `url` when the project database is found; `password` only if nellie generated it. `list`: an array of `{"project", "owner", "users": [{"name", "type", "expired"}]}`, where `type` is `application`, `admin` or `privileged`. |
+| `--json` | Print the result as JSON, not together with `--dry-run`. `rotate-password`: `user`; `database` and `url` when the project database is found; `password` only if nellie generated it. `list`: an array of `{"project", "owner", "users": [{"name", "type", "powers", "can_connect", "expired"}]}`, where `type` is `application`, `admin` or `privileged`, and `powers` says why (`""` otherwise). |
 
 Flags can go before or after the user name.
 

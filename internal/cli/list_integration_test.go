@@ -91,7 +91,7 @@ func TestListCommand(t *testing.T) {
 		}
 		want := []listProject{
 			{Project: empty, Owner: adminCfg.User, Users: []listUser{}},
-			{Project: full, Owner: adminCfg.User, Users: []listUser{{Name: user, Type: "application"}}},
+			{Project: full, Owner: adminCfg.User, Users: []listUser{{Name: user, Type: "application", CanConnect: true}}},
 		}
 		for _, w := range want {
 			if g := byName[w.Project]; !reflect.DeepEqual(g, w) {

@@ -48,10 +48,10 @@ func TestPrintList(t *testing.T) {
 	printList(&out, []pg.ProjectInfo{
 		{Name: "blog", Owner: "blog"},
 		{Name: "shop", Owner: "alice", Users: []pg.UserInfo{
-			{Name: "shop_admin", Kind: pg.AdminUser},
-			{Name: "shop_app", Kind: pg.AppUser, Expired: true},
+			{Name: "shop_admin", Kind: pg.AdminUser, CanConnect: true},
+			{Name: "shop_app", Kind: pg.AppUser, CanConnect: true, Expired: true},
 			{Name: "shop_boss", Kind: pg.AdminUser, Powers: "CREATEROLE, member of pg_monitor", Expired: true},
-			{Name: "shop_\x1b[2J", Kind: pg.AppUser},
+			{Name: "shop_\x1b[2J", Kind: pg.AppUser, CanConnect: true},
 		}},
 	})
 	want := `blog  (owner blog)
@@ -60,7 +60,7 @@ func TestPrintList(t *testing.T) {
 shop  (owner alice)
   shop_admin      admin
   shop_app        application  VALID UNTIL has passed, so it can't log in
-  shop_boss       privileged   CREATEROLE, member of pg_monitor; VALID UNTIL has passed, so it can't log in
+  shop_boss       privileged   CREATEROLE, member of pg_monitor; can't connect; VALID UNTIL has passed, so it can't log in
   "shop_\x1b[2J"  application
 `
 	if out.String() != want {
@@ -85,12 +85,12 @@ func TestListJSON(t *testing.T) {
 		{"no users", []pg.ProjectInfo{{Name: "blog", Owner: "blog"}}, `[{"project":"blog","owner":"blog","users":[]}]`},
 		{"users", []pg.ProjectInfo{{Name: "shop", Owner: "shop", Users: []pg.UserInfo{
 			{Name: "shop_admin", Kind: pg.AdminUser},
-			{Name: "shop_app", Kind: pg.AppUser, Expired: true},
+			{Name: "shop_app", Kind: pg.AppUser, CanConnect: true, Expired: true},
 			{Name: "shop_boss", Kind: pg.AdminUser, Powers: "CREATEROLE"},
 		}}}, `[{"project":"shop","owner":"shop","users":[` +
-			`{"name":"shop_admin","type":"admin","expired":false},` +
-			`{"name":"shop_app","type":"application","expired":true},` +
-			`{"name":"shop_boss","type":"privileged","expired":false}]}]`},
+			`{"name":"shop_admin","type":"admin","powers":"","can_connect":false,"expired":false},` +
+			`{"name":"shop_app","type":"application","powers":"","can_connect":true,"expired":true},` +
+			`{"name":"shop_boss","type":"privileged","powers":"CREATEROLE","can_connect":false,"expired":false}]}]`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

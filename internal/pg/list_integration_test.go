@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/rand"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -60,7 +61,9 @@ func TestListProjects(t *testing.T) {
 	mustExec(t, admin, "ALTER ROLE "+ident(p.Name+"_future")+" VALID UNTIL 'infinity'")
 	// v2's app user may also connect to p, but belongs to the longer v2.
 	mustExec(t, admin, "GRANT CONNECT ON DATABASE "+ident(p.Name)+" TO "+ident(v2.Name+"_app"))
-	// Named like a v2 user, but it can only connect to p, so it belongs to p.
+	// Named like a v2 user, so it's listed under v2, though it can only
+	// connect to p: CONNECT is up to each database's owner, so it mustn't
+	// decide where a role goes, or an owner could move roles around.
 	other := v2.Name + "_other"
 	*dropUsers = append(*dropUsers, other)
 	mustExec(t, admin, "CREATE ROLE "+ident(other)+" LOGIN")
@@ -75,8 +78,8 @@ func TestListProjects(t *testing.T) {
 	})
 	// A NOINHERIT member of p's owner doesn't use the owner's privileges
 	// directly, but can SET ROLE to it at any time, so it's an admin user. It
-	// doesn't inherit the owner's CONNECT either, and has none of its own: it's
-	// listed anyway, since the owner could hide it by revoking CONNECT.
+	// doesn't inherit the owner's CONNECT either, and has none of its own, so
+	// it's listed with can't connect.
 	ops := p.Name + "_ops"
 	*dropUsers = append(*dropUsers, ops)
 	mustExec(t, admin, "CREATE ROLE "+ident(ops)+" LOGIN NOINHERIT")
@@ -86,6 +89,20 @@ func TestListProjects(t *testing.T) {
 	*dropUsers = append(*dropUsers, boss)
 	mustExec(t, admin, "CREATE ROLE "+ident(boss)+" LOGIN CREATEROLE")
 	mustExec(t, admin, "GRANT CONNECT ON DATABASE "+ident(p.Name)+" TO "+ident(boss))
+	// Privileged through membership: in a CREATEROLE role, and in the owner
+	// of another database, which gives it that project too.
+	deputy, cross := p.Name+"_deputy", p.Name+"_cross"
+	*dropUsers = append(*dropUsers, deputy, cross)
+	for _, stmt := range []string{
+		"CREATE ROLE " + ident(deputy) + " LOGIN",
+		"GRANT " + ident(boss) + " TO " + ident(deputy),
+		"GRANT CONNECT ON DATABASE " + ident(p.Name) + " TO " + ident(deputy),
+		"CREATE ROLE " + ident(cross) + " LOGIN",
+		"GRANT " + ident(v2.Name) + " TO " + ident(cross),
+		"GRANT CONNECT ON DATABASE " + ident(p.Name) + " TO " + ident(cross),
+	} {
+		mustExec(t, admin, stmt)
+	}
 
 	// p_rep is a longer project the admin can't act for. Its reader can also
 	// connect to p, but belongs to p_rep, so it's not a user of p.
@@ -124,7 +141,8 @@ func TestListProjects(t *testing.T) {
 	mustExec(t, admin, "CREATE ROLE "+ident(x)+" LOGIN")
 	mustExec(t, admin, "GRANT "+ident(xOwner)+" TO "+ident(x))
 
-	// Named like users of p, but one has no CONNECT and one can't log in.
+	// Named like users of p: one can't connect, so it's listed with a note;
+	// one can't log in, so it's no user at all.
 	for _, r := range []string{p.Name + "_noconnect LOGIN", p.Name + "_nologin NOLOGIN"} {
 		name := strings.Fields(r)[0]
 		*dropUsers = append(*dropUsers, name)
@@ -207,19 +225,22 @@ func TestListProjects(t *testing.T) {
 
 	want := map[string]ProjectInfo{
 		p.Name: {Name: p.Name, Owner: p.Name, Users: []UserInfo{
-			{Name: p.Name + "_admin", Kind: AdminUser},
-			{Name: p.Name + "_app", Kind: AppUser},
-			{Name: p.Name + "_boss", Kind: AppUser, Powers: "CREATEROLE"},
-			{Name: p.Name + "_future", Kind: AppUser},
-			{Name: p.Name + "_old", Kind: AppUser, Expired: true},
+			{Name: p.Name + "_admin", Kind: AdminUser, CanConnect: true},
+			{Name: p.Name + "_app", Kind: AppUser, CanConnect: true},
+			{Name: p.Name + "_boss", Kind: AppUser, Powers: "CREATEROLE", CanConnect: true},
+			{Name: p.Name + "_cross", Kind: AppUser, Powers: "member of " + v2.Name, CanConnect: true},
+			{Name: p.Name + "_deputy", Kind: AppUser, Powers: "member of " + boss, CanConnect: true},
+			{Name: p.Name + "_future", Kind: AppUser, CanConnect: true},
+			{Name: p.Name + "_noconnect", Kind: AppUser},
+			{Name: p.Name + "_old", Kind: AppUser, CanConnect: true, Expired: true},
 			{Name: p.Name + "_ops", Kind: AdminUser},
-			{Name: v2.Name + "_other", Kind: AppUser},
 		}},
 		v2.Name: {Name: v2.Name, Owner: v2.Name, Users: []UserInfo{
-			{Name: v2.Name + "_app", Kind: AppUser},
+			{Name: v2.Name + "_app", Kind: AppUser, CanConnect: true},
+			{Name: v2.Name + "_other", Kind: AppUser},
 		}},
 		x: {Name: x, Owner: xOwner, Users: []UserInfo{
-			{Name: x, Kind: AdminUser},
+			{Name: x, Kind: AdminUser, CanConnect: true},
 		}},
 	}
 	for name, w := range want {
@@ -367,10 +388,48 @@ func TestPinSessionRefusesDatabaseRole(t *testing.T) {
 
 	inProject := cfg.Copy()
 	inProject.Database = p.Name
-	if _, err := ListProjects(ctx, inProject); err == nil || !strings.Contains(err.Error(), "makes every session act as role "+p.Name) {
+	if _, err := ListProjects(ctx, inProject); err == nil || !strings.Contains(err.Error(), "acts as role "+strconv.Quote(p.Name)) {
 		t.Errorf("ListProjects: got %v, want a refusal naming role %s", err, p.Name)
 	}
-	if _, err := RotatePassword(ctx, inProject, p.Name, NewPassword()); err == nil || !strings.Contains(err.Error(), "makes every session act as role") {
+	if _, err := RotatePassword(ctx, inProject, p.Name, NewPassword()); err == nil || !strings.Contains(err.Error(), "acts as role") {
 		t.Errorf("RotatePassword: got %v, want the same refusal", err)
+	}
+}
+
+// Value: protects=the admin's own role setting still works in a database that also has one, and pg_database_owner membership isn't a power; fails_when=pinSession refuses any switch or checks the database's setting, or the pg_database_owner exception goes; why_new=only the refusal was tested; seam=none
+func TestPinSessionAllowsAdminsOwnRole(t *testing.T) {
+	ctx := context.Background()
+	cfg := adminConfig(t)
+	p, _, dropUsers := newTestProject(t, cfg)
+	u, err := NewUser(AdminUser, p.Name+"_admin", p.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	*dropUsers = append(*dropUsers, u.Name)
+	if err := AddUser(ctx, cfg, u, NewPassword()); err != nil {
+		t.Fatal(err)
+	}
+
+	admin, err := pgx.ConnectConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { admin.Close(context.Background()) })
+	// The admin chose to act as p in p; p's owner also set a role there,
+	// which the admin's own setting overrides.
+	mustExec(t, admin, "ALTER ROLE "+ident(cfg.User)+" IN DATABASE "+ident(p.Name)+" SET role = "+literal(p.Name))
+	mustExec(t, admin, "ALTER DATABASE "+ident(p.Name)+" SET role = "+literal(p.Name))
+
+	inProject := cfg.Copy()
+	inProject.Database = p.Name
+	projects, err := ListProjects(ctx, inProject)
+	if err != nil {
+		t.Fatalf("ListProjects refused the admin's own role setting: %v", err)
+	}
+	// Connected to p, its admin user is a member of pg_database_owner, which
+	// is no power beyond the project.
+	i := slices.IndexFunc(projects, func(pr ProjectInfo) bool { return pr.Name == p.Name })
+	if i < 0 || !slices.Equal(projects[i].Users, []UserInfo{{Name: u.Name, Kind: AdminUser, CanConnect: true}}) {
+		t.Errorf("project %s: got %+v, want only %s as an unprivileged admin user", p.Name, projects, u.Name)
 	}
 }

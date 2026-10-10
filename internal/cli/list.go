@@ -19,7 +19,8 @@ import (
 
 const listHelp = `Lists the projects the admin role can act for: the databases it owns, or
 whose owner's privileges it has through membership. Under each project come
-its users, the login roles named <project>_<something> that can connect to it:
+its users, the login roles named <project>_<something>; a role goes under the
+longest database its name matches, and a note says when it can't connect:
 
   application  any other user, such as one made by "nellie add-user"
                as an application user, which reads and writes rows
@@ -27,7 +28,8 @@ its users, the login roles named <project>_<something> that can connect to it:
                owner's privileges and can do everything
   privileged   has powers beyond the project, shown next to it: SUPERUSER,
                CREATEROLE, REPLICATION, BYPASSRLS, or membership in a role
-               that has them or in a predefined pg_* role
+               that has them, in a predefined pg_* role, or in the owner of
+               another database
 
 The admin role itself isn't listed as a user. It only reads, and shows no
 passwords. Also known as "nellie trumpet".
@@ -42,9 +44,11 @@ type listProject struct {
 }
 
 type listUser struct {
-	Name    string `json:"name"`
-	Type    string `json:"type"`    // "application", "admin" or "privileged"
-	Expired bool   `json:"expired"` // VALID UNTIL has passed
+	Name       string `json:"name"`
+	Type       string `json:"type"`        // "application", "admin" or "privileged"
+	Powers     string `json:"powers"`      // why it's privileged, "" if it isn't
+	CanConnect bool   `json:"can_connect"` // may connect to the project's database
+	Expired    bool   `json:"expired"`     // VALID UNTIL has passed
 }
 
 func list(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
@@ -57,7 +61,7 @@ func list(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 	if opts.dryRun {
-		fmt.Fprint(stdout, "-- dry run: what nellie list runs after checking the server version and the session's role; it only reads\n"+pg.ListScript())
+		fmt.Fprint(stdout, "-- dry run: what nellie list runs (between the two statements it also checks the session's role and the server version); it only reads\n"+pg.ListScript())
 		return exitOK
 	}
 
@@ -97,7 +101,7 @@ func listJSON(projects []pg.ProjectInfo) []listProject {
 	for _, p := range projects {
 		lp := listProject{Project: p.Name, Owner: p.Owner, Users: make([]listUser, 0, len(p.Users))}
 		for _, u := range p.Users {
-			lp.Users = append(lp.Users, listUser{Name: u.Name, Type: userType(u), Expired: u.Expired})
+			lp.Users = append(lp.Users, listUser{Name: u.Name, Type: userType(u), Powers: u.Powers, CanConnect: u.CanConnect, Expired: u.Expired})
 		}
 		res = append(res, lp)
 	}
@@ -136,6 +140,9 @@ func printList(w io.Writer, projects []pg.ProjectInfo) {
 			var notes []string
 			if u.Powers != "" {
 				notes = append(notes, printable(u.Powers))
+			}
+			if !u.CanConnect {
+				notes = append(notes, "can't connect")
 			}
 			if u.Expired {
 				notes = append(notes, "VALID UNTIL has passed, so it can't log in")

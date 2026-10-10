@@ -32,15 +32,19 @@ var (
 // pinSearchPath is the first statement pinSession runs.
 const pinSearchPath = "SET search_path = pg_catalog, pg_temp"
 
-// pinSession prepares an admin connection that reads catalogs or calls
-// functions by unqualified name (RotatePassword, ListProjects). The owner of
+// pinSession prepares the admin connection of rotate-password and list,
+// which read catalogs and call functions by unqualified name. The owner of
 // the connection database controls two settings that would mislead nellie:
 //   - search_path, which can put the owner's schema first and fake pg_roles
 //     (or "="), so it's pinned to pg_catalog;
-//   - role (ALTER DATABASE ... SET role), which makes every session act as
-//     another role, so nellie would see and do only what that role can. Such
-//     a session is refused. A role setting of the admin's own (ALTER ROLE ...
-//     SET role) is the admin's choice and works as before.
+//   - role (ALTER DATABASE ... SET role), which makes sessions act as another
+//     role, so nellie would see and do only what that role can.
+//
+// The role check fails closed: a session acting as another role is refused
+// unless the admin's own settings explain it (ALTER ROLE <admin> [IN
+// DATABASE ...] SET role), which only the admin, or a role with power over
+// it, can change. Checking the database's setting instead would race: its
+// owner could clear the setting between the connect and the check.
 func pinSession(ctx context.Context, conn *pgx.Conn) error {
 	if _, err := conn.Exec(ctx, pinSearchPath); err != nil {
 		return fmt.Errorf("setting search_path: %w", err)
@@ -49,17 +53,21 @@ func pinSession(ctx context.Context, conn *pgx.Conn) error {
 	var switched bool
 	err := conn.QueryRow(ctx, `
 		SELECT current_database(), current_user, session_user,
-			current_user <> session_user AND EXISTS (
-				SELECT FROM pg_db_role_setting s JOIN pg_database d ON d.oid = s.setdatabase
-				WHERE d.datname = current_database() AND s.setrole = 0
-					AND EXISTS (SELECT FROM unnest(s.setconfig) c WHERE starts_with(c, 'role=')))`,
+			current_user <> session_user AND NOT EXISTS (
+				SELECT FROM pg_db_role_setting s
+				WHERE s.setrole = (SELECT oid FROM pg_roles WHERE rolname = session_user)
+					AND s.setdatabase IN (0, (SELECT oid FROM pg_database WHERE datname = current_database()))
+					AND 'role=' || current_user = ANY (s.setconfig))`,
 	).Scan(&db, &current, &session, &switched)
 	if err != nil {
 		return fmt.Errorf("checking the session's role: %w", err)
 	}
 	if switched {
-		return fmt.Errorf("database %s makes every session act as role %s instead of %s (ALTER DATABASE ... SET role); "+
-			"connect the admin to another database, such as postgres", db, current, session)
+		// %q: the names come from the catalog, and the database's owner picks
+		// the role, so they're quoted rather than sent to the terminal raw.
+		return fmt.Errorf("the session acts as role %q instead of %q, and the admin's own role settings don't explain it "+
+			"(an ALTER DATABASE %q SET role does, which the database's owner controls); connect the admin to another database, such as postgres",
+			current, session, db)
 	}
 	return nil
 }
