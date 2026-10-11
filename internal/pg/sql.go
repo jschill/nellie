@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -149,53 +150,57 @@ func checkVersion(version int) error {
 // its name matches, so names must not overlap.
 var ErrAmbiguous = errors.New("name would be ambiguous")
 
-// checkProjectNameUnambiguous refuses a project name that existing roles or
-// databases already extend (<name>_...): they would, or could later, be read
-// as this project's users. pg_catalog is spelled out because the add-*
-// connections don't pin search_path.
+// checkProjectNameUnambiguous refuses a project name that would move an
+// existing user: a login role named <name>_... whose home (the longest
+// database its name matches, as nellie list decides) is shorter than <name>
+// today, or missing, would become this project's user. Roles a longer
+// database already claims stay where they are, so databases alone never
+// refuse a name, and neither do roles list never shows as users (NOLOGIN, the
+// admin itself). The caller has pinned the session (pinSession).
 func checkProjectNameUnambiguous(ctx context.Context, conn *pgx.Conn, name string) error {
-	var dbs, roles []string
+	var moved []string
 	err := conn.QueryRow(ctx, `
-		SELECT
-			ARRAY(SELECT datname::text FROM pg_catalog.pg_database
-				WHERE pg_catalog.starts_with(datname, $1 || '_') ORDER BY 1),
-			ARRAY(SELECT rolname::text FROM pg_catalog.pg_roles
-				WHERE pg_catalog.starts_with(rolname, $1 || '_') ORDER BY 1)`,
+		SELECT ARRAY(SELECT r.rolname::text FROM pg_roles r
+			WHERE r.rolcanlogin AND r.rolname NOT IN (current_user, session_user)
+				AND starts_with(r.rolname, $1 || '_')
+				AND NOT EXISTS (SELECT FROM pg_database d
+					WHERE length(d.datname) > length($1)
+						AND (r.rolname = d.datname OR starts_with(r.rolname, d.datname || '_')))
+			ORDER BY 1)`,
 		name,
-	).Scan(&dbs, &roles)
+	).Scan(&moved)
 	if err != nil {
-		return fmt.Errorf("checking for names that start with %s_: %w", name, err)
+		return fmt.Errorf("checking for roles named %s_...: %w", name, err)
 	}
-	var taken []string
-	for _, d := range dbs {
-		taken = append(taken, "database "+d)
-	}
-	for _, r := range roles {
-		taken = append(taken, "role "+r)
-	}
-	if len(taken) > 0 {
-		return fmt.Errorf("%w: %s already start with %s_, and nellie tells projects apart by name prefix; pick another project name",
-			ErrAmbiguous, strings.Join(taken, ", "), name)
+	if len(moved) > 0 {
+		quoted := make([]string, len(moved))
+		for i, r := range moved {
+			// %q-style: names come from the catalog, so no raw control
+			// characters reach the terminal.
+			quoted[i] = strconv.Quote(r)
+		}
+		return fmt.Errorf("%w: project %s would claim existing login role(s) %s as its users, since nellie tells projects apart by name prefix; pick another project name",
+			ErrAmbiguous, name, strings.Join(quoted, ", "))
 	}
 	return nil
 }
 
 // checkUserNameUnambiguous refuses a user name that a database longer than
 // its project would claim: user shop_v2_app of project shop while a database
-// shop_v2 exists.
+// shop_v2 exists. The caller has pinned the session (pinSession).
 func checkUserNameUnambiguous(ctx context.Context, conn *pgx.Conn, user, project string) error {
 	var dbs []string
 	err := conn.QueryRow(ctx, `
-		SELECT ARRAY(SELECT datname::text FROM pg_catalog.pg_database
-			WHERE datname = ANY($1::text[]) AND pg_catalog.length(datname) > pg_catalog.length($2)
-			ORDER BY pg_catalog.length(datname) DESC)`,
+		SELECT ARRAY(SELECT datname::text FROM pg_database
+			WHERE datname = ANY($1::text[]) AND length(datname) > length($2)
+			ORDER BY length(datname) DESC)`,
 		projectCandidates(user), project,
 	).Scan(&dbs)
 	if err != nil {
 		return fmt.Errorf("checking for databases that would claim %s: %w", user, err)
 	}
 	if len(dbs) > 0 {
-		return fmt.Errorf("%w: user %s would belong to database %s by name, not to project %s; pick another suffix",
+		return fmt.Errorf("%w: user %s would belong to database %q by name, not to project %s; pick another suffix",
 			ErrAmbiguous, user, dbs[0], project)
 	}
 	return nil

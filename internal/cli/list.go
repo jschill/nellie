@@ -27,8 +27,8 @@ noted "belongs to database ...", so it can't silently disappear:
 
   application  any other user, such as one made by "nellie add-user"
                as an application user, which reads and writes rows
-  admin        a member of the owner role, so it has (or can take) the
-               owner's privileges and can do everything
+  admin        a member of the owner role, so it usually has (or can take)
+               the owner's privileges and can do everything
   privileged   has powers beyond the project, shown next to it: SUPERUSER,
                CREATEROLE, CREATEDB, REPLICATION, BYPASSRLS, membership in
                a role that has them or in a predefined pg_* role, or owning

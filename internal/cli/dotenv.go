@@ -18,7 +18,10 @@ import (
 // Connection-target keys (PG*) and TLS trust keys (SSL_CERT_*) are never taken
 // from the file: a .env in a checked-out repo could otherwise point nellie at
 // another host while the admin password is in the environment. They're skipped
-// with a warning that names the key. Set them in your shell instead.
+// with a warning that names the key. Set them in your shell instead. For the
+// same reason a DATABASE_URL from the file must carry its own password (see
+// connConfig): pgx would otherwise fill one in from PGPASSWORD or ~/.pgpass
+// and send it to whatever host the file names.
 func loadDotenv(path string, warn io.Writer) error {
 	f, err := os.Open(path)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -40,10 +43,15 @@ func loadDotenv(path string, warn io.Writer) error {
 		}
 		if _, set := os.LookupEnv(v.key); !set {
 			os.Setenv(v.key, v.value)
+			fromDotenv[v.key] = true
 		}
 	}
 	return nil
 }
+
+// fromDotenv records the keys loadDotenv set in this process, so connConfig
+// can tell a DATABASE_URL from a checked-out .env from one the user exported.
+var fromDotenv = map[string]bool{}
 
 // fileMayNotSet reports whether key must come from the environment, not .env.
 func fileMayNotSet(key string) bool {

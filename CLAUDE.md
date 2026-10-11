@@ -108,8 +108,7 @@ and so drop out of `list`; that's documented, not handled. It runs `pg.ListSQL` 
 bind parameters) after `pinSession` and the version check; `--dry-run` prints
 the pin and the query (`pg.ListScript`).
 
-`pinSession` (sql.go) starts the admin connection of `rotate-password` and
-`list` (not yet `add-*`): it pins `search_path` and refuses a session acting as
+`pinSession` (sql.go) starts the admin connection of every command: it pins `search_path` and refuses a session acting as
 another role unless the admin's own `ALTER ROLE ... SET role` explains it. It
 fails closed on purpose: checking the database's `role` setting instead races
 with its owner clearing it. That setting only picks the error's advice
@@ -153,7 +152,9 @@ Run all of these before calling a change done.
   in `internal/cli/dotenv.go`, no dependency). Variables already set in the
   environment win. `PG*` and `SSL_CERT_*` keys are skipped with a warning,
   so a checked-out `.env` can't redirect the admin connection; all other keys
-  load. `.env` is gitignored; `.env.example` shows the format.
+  load. A `DATABASE_URL` from `.env` (`fromDotenv`) must carry its own
+  password: `requireOwnPassword` hides pgx's PGPASSWORD, passfile and service
+  fallbacks while parsing it. `.env` is gitignored; `.env.example` shows the format.
 - All prompts in a command share one `prompter` (`internal/cli/prompt.go`):
   `bufio.Scanner` reads ahead, so a second scanner on stdin can lose input.
   Prompts go to stderr, so stdout stays clean.
@@ -203,8 +204,10 @@ more restricted users are added separately.
   `<project>_admin` still fits.
 - Names map to projects by longest prefix (`list`, `rotate-password`), so
   they must not overlap (`ErrAmbiguous`, JSC-3): `add-project <p>` refuses
-  when a role or database named `<p>_…` exists, and `add-user` refuses a name
-  that a database longer than its project would claim. Names that overlap
+  when it would take over a login role (not the admin) named `<p>_…` that no
+  longer database already claims, and `add-user` refuses a name that a
+  database longer than its project would claim. Databases and `NOLOGIN` roles
+  don't block a project name. Errors quote catalog names (`%q`). Names that overlap
   from before stay possible; `list` and `rotate-password` assign them by name
   and only give a URL for a database owned by the role named after it.
 

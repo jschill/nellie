@@ -116,6 +116,11 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 // would carry the admin password into shell history and the process list.
 func connConfig(p *prompter) (*pgx.ConnConfig, error) {
 	if dsn := os.Getenv("DATABASE_URL"); dsn != "" || hasPGEnv() {
+		if dsn != "" && fromDotenv["DATABASE_URL"] {
+			if err := requireOwnPassword(dsn); err != nil {
+				return nil, err
+			}
+		}
 		return parseAdmin(dsn)
 	}
 
@@ -132,6 +137,36 @@ func connConfig(p *prompter) (*pgx.ConnConfig, error) {
 		}
 		fmt.Fprintln(p.out, err)
 	}
+}
+
+// requireOwnPassword refuses a connection string without a password of its
+// own. It's for a DATABASE_URL from .env, which a checked-out repo controls:
+// pgx would fill a missing password in from PGPASSWORD, a passfile or a
+// service file, and send the admin password to whatever host the URL names.
+// pgx reads those from the environment, so they're hidden while it parses.
+func requireOwnPassword(dsn string) error {
+	hidden := map[string]string{"PGPASSWORD": "", "PGPASSFILE": os.DevNull, "PGSERVICE": "", "PGSERVICEFILE": os.DevNull}
+	for key, value := range hidden {
+		old, had := os.LookupEnv(key)
+		os.Setenv(key, value)
+		defer func() {
+			if had {
+				os.Setenv(key, old)
+			} else {
+				os.Unsetenv(key)
+			}
+		}()
+	}
+	cfg, err := pgx.ParseConfig(dsn)
+	if err != nil {
+		return errBadURL
+	}
+	if cfg.Password == "" {
+		return errors.New("the DATABASE_URL in .env has no password of its own, and nellie won't fill one in from " +
+			"PGPASSWORD, ~/.pgpass or a service file for a URL a checked-out .env can point anywhere; " +
+			"put the password in that URL, or set DATABASE_URL in your shell instead")
+	}
+	return nil
 }
 
 // errBadURL is what the user sees when pgx can't read the connection settings.

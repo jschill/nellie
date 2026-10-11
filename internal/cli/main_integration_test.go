@@ -52,6 +52,10 @@ func sweep(dsn string) {
 			return
 		}
 		for _, name := range names {
+			if q.drop == "DROP DATABASE IF EXISTS " {
+				// A template can't be dropped; some tests make one.
+				conn.Exec(ctx, "ALTER DATABASE "+pgx.Identifier{name}.Sanitize()+" IS_TEMPLATE false")
+			}
 			if _, err := conn.Exec(ctx, q.drop+pgx.Identifier{name}.Sanitize()); err != nil {
 				fmt.Fprintf(os.Stderr, "sweep: %s%s: %v\n", q.drop, name, err)
 			}

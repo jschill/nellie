@@ -34,8 +34,8 @@ type Rotation struct {
 	// Expired means the role's VALID UNTIL has passed. A new password doesn't
 	// change that, so the new password won't work either.
 	Expired bool
-	// Template means the role's home database is a template, so any CREATEDB
-	// role can copy it, data included.
+	// Template means the project nellie list shows the role under is a
+	// template, so any CREATEDB role can copy it, data included.
 	Template bool
 	// Powers is what the role can do beyond its project that rotate-password
 	// doesn't refuse (CREATEDB, owning another database, ...), as nellie list
@@ -86,13 +86,19 @@ func RotatePassword(ctx context.Context, cfg *pgx.ConnConfig, role, password str
 
 	// The password has changed by now, so a failed lookup mustn't read as a
 	// failed rotation: without a database the caller just prints no URL.
-	home, usable, template, _ := projectHome(ctx, admin, role)
-	db := ""
-	if usable {
-		db = home
+	// The warnings (template, powers) are best-effort the same way: skipped
+	// when a lookup fails.
+	rot := Rotation{Expired: expired}
+	if home, usable, err := projectHome(ctx, admin, role); err == nil && usable {
+		rot.Database = home
 	}
-	powers, _ := rolePowers(ctx, admin, role, home)
-	return Rotation{Database: db, Expired: expired, Template: template, Powers: powers}, nil
+	// The warnings are about the project nellie list shows the role under,
+	// so the two commands agree.
+	if shown, template, err := shownProject(ctx, admin, role); err == nil {
+		rot.Template = template
+		rot.Powers, _ = rolePowers(ctx, admin, role, shown)
+	}
+	return rot, nil
 }
 
 // checkRotatable refuses roles whose password nellie shouldn't change:
@@ -148,7 +154,7 @@ func checkRotatable(ctx context.Context, conn *pgx.Conn, role string) (expired b
 			role, strings.Join(powers, ", "))
 	}
 	if via != "" {
-		return false, fmt.Errorf("role %s is a member of %s, which nellie's roles never are; change its password with psql's \\password instead",
+		return false, fmt.Errorf("role %s is a member of %q, which nellie's roles never are; change its password with psql's \\password instead",
 			role, via)
 	}
 	return expired, nil
@@ -161,28 +167,43 @@ func checkRotatable(ctx context.Context, conn *pgx.Conn, role string) (expired b
 // role can connect to it (canConnectExpr). A URL never names a shorter
 // database instead, and never one picked by access: a database's owner
 // controls CONNECT, and a CREATEDB role can create a database named like a
-// user, though not one owned by a role named after it. template says whether
-// the home is a template database.
-func projectHome(ctx context.Context, conn *pgx.Conn, role string) (home string, usable, template bool, err error) {
+// user, though not one owned by a role named after it.
+func projectHome(ctx context.Context, conn *pgx.Conn, role string) (home string, usable bool, err error) {
 	err = conn.QueryRow(ctx, `
 		SELECT d.datname,
 			d.datname NOT IN ('template0', 'template1') AND d.datconnlimit <> -2 -- -2 marks an invalid database
 				AND pg_has_role(d.datdba, 'USAGE') AND pg_get_userbyid(d.datdba) = d.datname
-				AND `+canConnectExpr+`,
-			d.datistemplate
+				AND `+canConnectExpr+`
 		FROM pg_database d, pg_roles r
 		WHERE d.datname = ANY($1::text[]) AND r.rolname = $2
 		ORDER BY length(d.datname) DESC LIMIT 1`,
 		projectCandidates(role), role,
-	).Scan(&home, &usable, &template)
+	).Scan(&home, &usable)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", false, false, nil
+		return "", false, nil
 	}
-	return home, usable, template, err
+	return home, usable, err
 }
 
-// rolePowers returns role's powers beyond db (its project database, or ""),
-// computed as for nellie list (powersExpr); nil for none.
+// shownProject returns the project nellie list shows role under (see
+// ListSQL's users): the longest of role's projectCandidates that is one of
+// the admin's projects, or "" for none, and whether it's a template database.
+func shownProject(ctx context.Context, conn *pgx.Conn, role string) (project string, template bool, err error) {
+	err = conn.QueryRow(ctx, `
+		SELECT datname, datistemplate FROM pg_database
+		WHERE datname = ANY($1::text[]) AND datconnlimit <> -2
+			AND datname NOT IN ('template0', 'template1') AND pg_has_role(datdba, 'USAGE')
+		ORDER BY length(datname) DESC LIMIT 1`,
+		projectCandidates(role),
+	).Scan(&project, &template)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", false, nil
+	}
+	return project, template, err
+}
+
+// rolePowers returns role's powers beyond db (the project nellie list shows
+// it under, or ""), computed as for nellie list (powersExpr); nil for none.
 func rolePowers(ctx context.Context, conn *pgx.Conn, role, db string) ([]string, error) {
 	var powers []string
 	err := conn.QueryRow(ctx, `WITH `+poweredCTE+`

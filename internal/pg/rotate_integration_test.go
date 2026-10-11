@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -100,7 +101,7 @@ func TestRotatePasswordRefuses(t *testing.T) {
 		// Value: protects=nellie can't be used to take over another admin's login; fails_when=checkRotatable stops checking rolcreaterole; why_new=privileged non-superusers were rotatable; seam=none
 		{"another admin", otherAdmin, "has CREATEROLE"},
 		// Value: protects=a plain role that can SET ROLE to an admin is refused like the admin; fails_when=the membership clause is dropped; why_new=pass-2 security review; seam=none
-		{"member of another admin", viaAdmin, "is a member of " + otherAdmin},
+		{"member of another admin", viaAdmin, "is a member of " + strconv.Quote(otherAdmin)},
 	}
 
 	// The test server's superuser, if it has a name nellie accepts.
@@ -228,6 +229,46 @@ func TestRotatePasswordPicksProjectByName(t *testing.T) {
 	if db := rotate(u.Name); db != "" {
 		t.Errorf("database = %q, want none: %s isn't owned by a role named after it", db, u.Name)
 	}
+
+	// Value: protects=no URL names a database the admin can't act for, though its owner is named after it and the user can connect; fails_when=projectHome drops its pg_has_role(datdba, 'USAGE') check; why_new=every URL case used the admin's own projects; seam=none; no_claim=skipped for a superuser admin, which acts for every owner
+	t.Run("database the admin can't act for", func(t *testing.T) {
+		var super bool
+		if err := admin.QueryRow(ctx, "SELECT rolsuper FROM pg_roles WHERE rolname = current_user").Scan(&super); err != nil {
+			t.Fatal(err)
+		}
+		if super {
+			t.Skip("a superuser admin acts for every database's owner")
+		}
+		// Shaped like a nellie project (owner named after it, PUBLIC keeps
+		// CONNECT), but the admin gives up its membership in the owner.
+		q := "nellie_it_" + strings.ToLower(NewPassword()[:8])
+		qApp := q + "_app"
+		*dropUsers = append(*dropUsers, qApp, q)
+		mustExec(t, admin, "CREATE ROLE "+ident(q)+" NOLOGIN")
+		mustExec(t, admin, "GRANT "+ident(q)+" TO "+ident(cfg.User))
+		mustExec(t, admin, "CREATE DATABASE "+ident(q)+" OWNER "+ident(q))
+		t.Cleanup(func() {
+			for _, stmt := range []string{
+				"GRANT " + ident(q) + " TO " + ident(cfg.User),
+				"DROP DATABASE IF EXISTS " + ident(q),
+			} {
+				if _, err := admin.Exec(context.Background(), stmt); err != nil {
+					t.Errorf("%s: %v", stmt, err)
+				}
+			}
+		})
+		mustExec(t, admin, "REVOKE "+ident(q)+" FROM "+ident(cfg.User))
+		mustExec(t, admin, "CREATE ROLE "+ident(qApp)+" LOGIN")
+		if db := rotate(qApp); db != "" {
+			t.Errorf("database = %q, want none: the admin can't act for %s's owner", db, q)
+		}
+		// Control: with the membership back, the same database gets the URL,
+		// so membership is what made the difference above.
+		mustExec(t, admin, "GRANT "+ident(q)+" TO "+ident(cfg.User))
+		if db := rotate(qApp); db != q {
+			t.Errorf("control: database = %q, want %s once the admin acts for its owner", db, q)
+		}
+	})
 }
 
 // Value: protects=add-project and add-user refuse names that would make the name-to-project mapping ambiguous; fails_when=either check is dropped; why_new=JSC-3; seam=none
@@ -244,24 +285,32 @@ func TestNamesMustBeUnambiguous(t *testing.T) {
 	if err := AddUser(ctx, cfg, app, NewPassword()); err != nil {
 		t.Fatal(err)
 	}
+	admin, err := pgx.ConnectConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { admin.Close(context.Background()) })
+	// Another login role a project p_v2 would claim, named with a control
+	// character: the refusal must quote it, not send it to the terminal.
+	bell := p.Name + "_v2_\a"
+	*dropUsers = append(*dropUsers, bell)
+	mustExec(t, admin, "CREATE ROLE "+ident(bell)+" LOGIN")
+
 	// A project p_v2 would claim p's user p_v2_app.
 	v2, err := NewProject(p.Name + "_v2")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := CreateProject(ctx, cfg, v2, NewPassword()); !errors.Is(err, ErrAmbiguous) || !strings.Contains(err.Error(), "role "+app.Name) {
-		t.Errorf("CreateProject(%s) = %v, want ErrAmbiguous naming role %s", v2.Name, err, app.Name)
+	err = CreateProject(ctx, cfg, v2, NewPassword())
+	if !errors.Is(err, ErrAmbiguous) || !strings.Contains(err.Error(), strconv.Quote(app.Name)) ||
+		!strings.Contains(err.Error(), strconv.Quote(bell)) || strings.Contains(err.Error(), "\a") {
+		t.Errorf("CreateProject(%s) = %v, want ErrAmbiguous naming %s and %q, escaped", v2.Name, err, app.Name, bell)
 		if err == nil {
 			dropProject(context.Background(), cfg, v2, true)
 		}
 	}
 
 	// The other order: with a database p_x, a user p_x_app of p would belong to it.
-	admin, err := pgx.ConnectConfig(ctx, cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { admin.Close(context.Background()) })
 	x := p.Name + "_x"
 	mustExec(t, admin, "CREATE DATABASE "+ident(x))
 	t.Cleanup(func() {
@@ -274,9 +323,107 @@ func TestNamesMustBeUnambiguous(t *testing.T) {
 		t.Fatal(err)
 	}
 	*dropUsers = append(*dropUsers, xApp.Name)
-	if err := AddUser(ctx, cfg, xApp, NewPassword()); !errors.Is(err, ErrAmbiguous) || !strings.Contains(err.Error(), "database "+x) {
+	if err := AddUser(ctx, cfg, xApp, NewPassword()); !errors.Is(err, ErrAmbiguous) || !strings.Contains(err.Error(), "database "+strconv.Quote(x)) {
 		t.Errorf("AddUser(%s) = %v, want ErrAmbiguous naming database %s", xApp.Name, err, x)
 	}
+
+	// Value: protects=add-project refuses only names that would move a login role: not for databases, NOLOGIN roles, or roles a longer database already claims; fails_when=the guard goes back to plain prefix matching or counts NOLOGIN roles; why_new=red team: order dependence and NOLOGIN groups; seam=none
+	t.Run("only moving a login role refuses a name", func(t *testing.T) {
+		q, err := NewProject("nellie_it_" + strings.ToLower(NewPassword()[:8]))
+		if err != nil {
+			t.Fatal(err)
+		}
+		// q_v2 first, with its user q_v2_app, which stays q_v2's when q
+		// exists; a database q_db and a NOLOGIN role q_grp move nobody.
+		qv2, err := NewProject(q.Name + "_v2")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := CreateProject(ctx, cfg, qv2, NewPassword()); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if err := dropProject(context.Background(), cfg, qv2, true); err != nil {
+				t.Errorf("dropping %s: %v", qv2.Name, err)
+			}
+		})
+		qApp, err := NewUser(AppUser, qv2.Name+"_app", qv2.Name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		*dropUsers = append(*dropUsers, qApp.Name, q.Name+"_grp")
+		if err := AddUser(ctx, cfg, qApp, NewPassword()); err != nil {
+			t.Fatal(err)
+		}
+		qDB := q.Name + "_db"
+		mustExec(t, admin, "CREATE DATABASE "+ident(qDB))
+		t.Cleanup(func() {
+			if _, err := admin.Exec(context.Background(), "DROP DATABASE IF EXISTS "+ident(qDB)); err != nil {
+				t.Errorf("dropping %s: %v", qDB, err)
+			}
+		})
+		mustExec(t, admin, "CREATE ROLE "+ident(q.Name+"_grp")+" NOLOGIN")
+
+		if err := CreateProject(ctx, cfg, q, NewPassword()); err != nil {
+			t.Fatalf("CreateProject(%s) = %v, want it allowed: nothing would move", q.Name, err)
+		}
+		t.Cleanup(func() {
+			if err := dropProject(context.Background(), cfg, q, true); err != nil {
+				t.Errorf("dropping %s: %v", q.Name, err)
+			}
+		})
+	})
+
+	// Value: protects=add-project and add-user don't run functions a project owner planted in the admin's connection database; fails_when=pinSession is dropped from add-*; why_new=only list's query was tested against shadowing; seam=none; no_claim=only starts_with(name, text) and length(name) are planted
+	t.Run("planted functions in the connection database", func(t *testing.T) {
+		// As in TestListProjectsIgnoresShadowedFunctions: exact matches for
+		// name arguments beat pg_catalog's text versions on the default
+		// search_path, which pinSession pins for add-* too.
+		inProject := cfg.Copy()
+		inProject.Database = p.Name
+		owner, err := pgx.ConnectConfig(ctx, inProject)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { owner.Close(context.Background()) })
+		mustExec(t, owner, "SET ROLE "+ident(p.Name))
+		mustExec(t, owner, `CREATE FUNCTION public.starts_with(name, text) RETURNS boolean
+			LANGUAGE plpgsql AS $$BEGIN RAISE EXCEPTION 'planted starts_with ran'; END$$`)
+		mustExec(t, owner, `CREATE FUNCTION public.length(name) RETURNS integer
+			LANGUAGE plpgsql AS $$BEGIN RAISE EXCEPTION 'planted length ran'; END$$`)
+		mustExec(t, owner, "RESET ROLE")
+		// Control: unqualified calls do run them, so the checks below mean something.
+		for _, sql := range []string{
+			"SELECT starts_with(datname, 'x') FROM pg_database",
+			"SELECT length(datname) FROM pg_database",
+		} {
+			if _, err := owner.Exec(ctx, sql); err == nil || !strings.Contains(err.Error(), "planted") {
+				t.Fatalf("%s didn't run the planted function, so this test proves nothing: %v", sql, err)
+			}
+		}
+
+		q, err := NewProject("nellie_it_" + strings.ToLower(NewPassword()[:8]))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := CreateProject(ctx, inProject, q, NewPassword()); err != nil {
+			t.Errorf("CreateProject from %s: %v", p.Name, err)
+		} else {
+			t.Cleanup(func() {
+				if err := dropProject(context.Background(), cfg, q, true); err != nil {
+					t.Errorf("dropping %s: %v", q.Name, err)
+				}
+			})
+		}
+		u, err := NewUser(AppUser, p.Name+"_planted", p.Name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		*dropUsers = append(*dropUsers, u.Name)
+		if err := AddUser(ctx, inProject, u, NewPassword()); err != nil {
+			t.Errorf("AddUser from %s: %v", p.Name, err)
+		}
+	})
 }
 
 // Value: protects=rotate-password reports powers the new password carries beyond the project, as list shows them; fails_when=rolePowers stops being called or loses a power; why_new=red team: list and rotate disagreed; seam=none
@@ -313,6 +460,36 @@ func TestRotatePasswordReportsPowers(t *testing.T) {
 	if !slices.Equal(rot.Powers, []string{"CREATEDB"}) {
 		t.Errorf("powers = %q, want CREATEDB", rot.Powers)
 	}
+
+	// A user owning its own database, which the admin can't act for: list
+	// shows it under p with "owner of" that database, and so does rotate.
+	var super bool
+	if err := admin.QueryRow(ctx, "SELECT rolsuper FROM pg_roles WHERE rolname = current_user").Scan(&super); err != nil {
+		t.Fatal(err)
+	}
+	if super {
+		return // a superuser admin acts for that database too, so it's the user's own project
+	}
+	own := p.Name + "_own"
+	*dropUsers = append(*dropUsers, own)
+	mustExec(t, admin, "CREATE ROLE "+ident(own)+" LOGIN")
+	mustExec(t, admin, "GRANT "+ident(own)+" TO "+ident(cfg.User))
+	mustExec(t, admin, "CREATE DATABASE "+ident(own)+" OWNER "+ident(own))
+	mustExec(t, admin, "REVOKE "+ident(own)+" FROM "+ident(cfg.User))
+	t.Cleanup(func() {
+		// Dropping a database takes membership in its owner.
+		admin.Exec(context.Background(), "GRANT "+ident(own)+" TO "+ident(cfg.User))
+		if _, err := admin.Exec(context.Background(), "DROP DATABASE IF EXISTS "+ident(own)); err != nil {
+			t.Errorf("dropping %s: %v", own, err)
+		}
+	})
+	rot, err = RotatePassword(ctx, cfg, own, NewPassword())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(rot.Powers, []string{"owner of " + own}) || rot.Database != "" {
+		t.Errorf("rotation of %s = %+v, want powers [owner of %s] as list shows them, and no URL", own, rot, own)
+	}
 }
 
 // Value: protects=a role in a predefined pg_* role (here pg_monitor) is refused, since those grant powers nellie never hands out; fails_when=the pg_* membership clause is dropped or turned back into a short list; why_new=pass-3 red team; seam=none
@@ -335,7 +512,7 @@ func TestRotatePasswordRefusesPredefinedRoleMembers(t *testing.T) {
 	}
 
 	_, err = RotatePassword(ctx, cfg, role, NewPassword())
-	if err == nil || !strings.Contains(err.Error(), "is a member of pg_monitor") {
+	if err == nil || !strings.Contains(err.Error(), "is a member of \"pg_monitor\"") {
 		t.Errorf("got %v, want a refusal naming pg_monitor", err)
 	}
 }

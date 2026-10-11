@@ -41,6 +41,10 @@ type rotateResult struct {
 	Database string `json:"database,omitempty"` // "" if there's no usable project database (see pg.Rotation)
 	Password string `json:"password,omitempty"` // only when nellie generated it
 	URL      string `json:"url,omitempty"`      // only when Database is known
+	// The warnings, for scripts: always present, so the shape is fixed.
+	Expired  bool     `json:"expired"`  // VALID UNTIL has passed: the new password won't work yet
+	Template bool     `json:"template"` // the project database is a template anyone with CREATEDB can copy
+	Powers   []string `json:"powers"`   // powers beyond the project, as nellie list shows them; [] for none
 }
 
 func rotatePassword(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
@@ -120,7 +124,8 @@ func rotatePassword(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 	if generated {
 		shown = password
 	}
-	res := rotateResult{User: user, Database: rot.Database, Password: shown}
+	res := rotateResult{User: user, Database: rot.Database, Password: shown,
+		Expired: rot.Expired, Template: rot.Template, Powers: nonNil(rot.Powers)}
 	if rot.Database != "" {
 		res.URL = connURL(cfg, user, shown, rot.Database)
 	}

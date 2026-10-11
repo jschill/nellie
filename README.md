@@ -91,10 +91,10 @@ Anything already set in your shell wins over `.env`, so a one-off
 variables are ignored in `.env`, with a warning, so a checked-out `.env` can't
 point nellie at another server. Set those in your shell.
 
-One thing to know: `PGPASSWORD` from your shell is used with whatever host the
-connection URL names. If you run nellie in a checkout whose `.env` you don't
-trust, that URL could name another host. Check `.env` first, or keep the
-password out of your shell.
+A `DATABASE_URL` from `.env` must contain its own password. Otherwise pgx
+would fill one in from `PGPASSWORD`, `~/.pgpass` or a service file and send it
+to whatever host the URL names, and a checked-out `.env` can name any host.
+A `DATABASE_URL` you set in your shell can leave the password to those.
 
 ### TLS
 
@@ -135,10 +135,12 @@ and are at most 57 characters long, so that every user name nellie suggests
 still fits within Postgres's 63-character limit. `pg` is refused, because its
 users would be named `pg_...`, a prefix Postgres reserves.
 
-nellie tells projects apart by name, so a name that existing roles or
-databases already extend is refused too: with a role `shop_v2_app` on the
-server, there's no project `shop_v2`. Otherwise that role would suddenly look
-like `shop_v2`'s user.
+nellie tells projects apart by name, so a name that would take over existing
+login roles is refused too: with a role `shop_v2_app` on the server, there's no
+project `shop_v2`. Otherwise that role would suddenly look like `shop_v2`'s
+user. A role that a longer project name already covers stays where it is
+(`shop_v2_app` with a database `shop_v2` doesn't stop a project `shop`), and
+databases and roles that can't log in don't count.
 
 ### `nellie add-user`
 
@@ -226,7 +228,7 @@ which it has for every role it created; on Postgres 15 `CREATEROLE` is enough. I
 passed, nellie still sets the password but warns you, since `VALID UNTIL`
 expires the password: the new one won't work until that's cleared.
 
-`rotate-password` and `list` also refuse a session that acts as a role other
+Every command that connects also refuses a session that acts as a role other
 than the admin, unless the admin's own settings say so (`ALTER ROLE ... SET
 role`). A database's owner can set a role for every session there (`ALTER
 DATABASE ... SET role`), and nellie would then see and do only what that role
@@ -296,7 +298,7 @@ allow that). If a project you expect is missing on Postgres 15, check with
 | --- | --- |
 | `--dry-run` | Print the SQL instead of running it. Doesn't connect. Passwords show as `<redacted>`. All commands (for `list`, the query it runs, after pinning `search_path`). |
 | `--generate` | Generate the new password without asking. `rotate-password` only. |
-| `--json` | Print the result as JSON, not together with `--dry-run`. `rotate-password`: `user`; `database` and `url` when the project database is found; `password` only if nellie generated it. `list`: an array of `{"project", "owner", "owner_powers", "template", "foreign_owner", "users": [{"name", "type", "powers", "belongs_to", "can_connect", "expired"}]}`, where `type` is `application`, `admin` or `privileged`, `powers` and `owner_powers` are arrays with one power each (`[]` for none), and `belongs_to` names the database a user's name belongs to when that isn't the project (`""` otherwise). |
+| `--json` | Print the result as JSON, not together with `--dry-run`. `rotate-password`: `user`; `database` and `url` when the role's project database is usable (see `rotate-password` above); `password` only if nellie generated it; `expired` (the role's `VALID UNTIL` has passed), `template` (its project is a template) and `powers` (as in `list`, `[]` for none), always present. `list`: an array of `{"project", "owner", "owner_powers", "template", "foreign_owner", "users": [{"name", "type", "powers", "belongs_to", "can_connect", "expired"}]}`, where `type` is `application`, `admin` or `privileged`, `powers` and `owner_powers` are arrays with one power each (`[]` for none), and `belongs_to` names the database a user's name belongs to when that isn't the project (`""` otherwise). |
 
 Flags can go before or after the user name.
 

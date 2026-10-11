@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -472,7 +473,7 @@ func TestAddUserNeedsMembershipInOwner(t *testing.T) {
 	if err == nil {
 		t.Fatal("AddUser succeeded for a database whose owner the admin isn't a member of")
 	}
-	if !strings.Contains(err.Error(), "isn't a member of its owner "+owner) {
+	if !strings.Contains(err.Error(), "isn't a member of its owner "+strconv.Quote(owner)) {
 		t.Errorf("unexpected error: %v", err)
 	}
 

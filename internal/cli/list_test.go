@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -85,6 +86,8 @@ func TestListJSON(t *testing.T) {
 	}{
 		{"no projects", nil, `[]`},
 		{"no users", []pg.ProjectInfo{{Name: "blog", Owner: "blog"}}, `[{"project":"blog","owner":"blog","owner_powers":[],"template":false,"foreign_owner":false,"users":[]}]`},
+		{"project flags", []pg.ProjectInfo{{Name: "blog", Owner: "alice", OwnerPowers: []string{"CREATEDB"}, Template: true}},
+			`[{"project":"blog","owner":"alice","owner_powers":["CREATEDB"],"template":true,"foreign_owner":false,"users":[]}]`},
 		{"users", []pg.ProjectInfo{{Name: "shop", Owner: "shop", Users: []pg.UserInfo{
 			{Name: "shop_admin", Kind: pg.AdminUser},
 			{Name: "shop_app", Kind: pg.AppUser, CanConnect: true, Expired: true},
@@ -129,7 +132,7 @@ func TestPrintListEscapesEveryName(t *testing.T) {
 			var out bytes.Buffer
 			printList(&out, []pg.ProjectInfo{tt.project})
 			got := out.String()
-			if strings.ContainsAny(got, "\x1b"+string(rune(0x202e))) || strings.Contains(got, "x\n") {
+			if strings.ContainsAny(got, "\x1b"+string(rune(0x202e))) || strings.Contains(got, "[2J\n") {
 				t.Errorf("raw control characters in the output: %q", got)
 			}
 			if !strings.Contains(got, escaped) {
@@ -144,7 +147,10 @@ func TestListConnectionFailure(t *testing.T) {
 	clearConnEnv(t)
 	const secret = "S3cr3tPW"
 	// Port 1 on loopback: nothing listens there, so the connection is refused at once.
-	t.Setenv("DATABASE_URL", "postgres://admin:"+secret+"@127.0.0.1:1/postgres?sslmode=disable&connect_timeout=5")
+	// Built with net/url, so no literal user:password@ URL sits in the source.
+	u := url.URL{Scheme: "postgres", User: url.UserPassword("admin", secret), Host: "127.0.0.1:1",
+		Path: "/postgres", RawQuery: "sslmode=disable&connect_timeout=5"}
+	t.Setenv("DATABASE_URL", u.String())
 	for _, args := range [][]string{{"list"}, {"list", "--json"}} {
 		var stdout, stderr bytes.Buffer
 		if code := Run(args, strings.NewReader(""), &stdout, &stderr); code != exitError {

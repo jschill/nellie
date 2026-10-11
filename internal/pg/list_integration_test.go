@@ -141,6 +141,26 @@ func TestListProjects(t *testing.T) {
 		}
 	})
 
+	// p_evil is a login role that owns the database p_evil, as a CREATEDB
+	// role named like a user could make it, and the admin can't act for it.
+	// Its home isn't a project, so it's shown under p, belonging to p_evil.
+	evil := p.Name + "_evil"
+	*dropUsers = append(*dropUsers, evil)
+	mustExec(t, admin, "CREATE ROLE "+ident(evil)+" LOGIN")
+	mustExec(t, admin, "GRANT "+ident(evil)+" TO "+ident(cfg.User))
+	mustExec(t, admin, "CREATE DATABASE "+ident(evil)+" OWNER "+ident(evil))
+	mustExec(t, admin, "REVOKE "+ident(evil)+" FROM "+ident(cfg.User))
+	t.Cleanup(func() {
+		for _, stmt := range []string{
+			"GRANT " + ident(evil) + " TO " + ident(cfg.User),
+			"DROP DATABASE IF EXISTS " + ident(evil),
+		} {
+			if _, err := admin.Exec(context.Background(), stmt); err != nil {
+				t.Errorf("%s: %v", stmt, err)
+			}
+		}
+	})
+
 	// p_x is owned by a role not named after it, and a role named exactly
 	// p_x is a member of that owner. The owner is shown as the owner, not as
 	// a user; p_x is an admin user.
@@ -303,6 +323,10 @@ func TestListProjects(t *testing.T) {
 	if !super {
 		pw := want[p.Name]
 		pw.Users = append(pw.Users, UserInfo{Name: repReader, Kind: AppUser, BelongsTo: rep, CanConnect: true})
+		// Value: protects=a login role owning its own same-named database the admin can't act for is still listed under p, as belonging there and privileged; fails_when=users drops the owner of a role's home instead of the shown project's owner; why_new=only a NOLOGIN home owner was set up; seam=none; no_claim=a superuser admin acts for p_evil, so only non-superuser runs check it
+		pw.Users = append(pw.Users, UserInfo{Name: evil, Kind: AppUser, Powers: []string{"owner of " + evil}, BelongsTo: evil})
+		// Users come sorted by name (rolname sorts bytewise, like Go strings).
+		slices.SortFunc(pw.Users, func(a, b UserInfo) int { return strings.Compare(a.Name, b.Name) })
 		want[p.Name] = pw
 	}
 	for name, w := range want {
@@ -518,6 +542,16 @@ func TestPinSessionRefusesDatabaseRole(t *testing.T) {
 	}
 	if _, err := RotatePassword(ctx, inProject, p.Name, NewPassword()); err == nil || !strings.Contains(err.Error(), "acts as role") {
 		t.Errorf("RotatePassword: got %v, want the same refusal", err)
+	}
+	q, err := NewProject("nellie_it_" + strings.ToLower(NewPassword()[:8]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := CreateProject(ctx, inProject, q, NewPassword()); err == nil || !strings.Contains(err.Error(), "acts as role") {
+		t.Errorf("CreateProject: got %v, want the same refusal", err)
+		if err == nil {
+			dropProject(context.Background(), cfg, q, true)
+		}
 	}
 }
 
