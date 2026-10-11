@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -473,15 +474,20 @@ func TestDotenvURLNeedsItsOwnPassword(t *testing.T) {
 	t.Cleanup(func() { fromDotenv = saved })
 	p := newPrompter(strings.NewReader(""), &bytes.Buffer{}) // any read would fail
 
+	// Built with net/url, like TestListConnectionFailure, so no literal
+	// URL with credentials sits in the source.
+	dbURL := func(user *url.Userinfo) string {
+		return (&url.URL{Scheme: "postgres", User: user, Host: "other.example", Path: "/postgres"}).String()
+	}
 	tests := []struct {
 		name     string
 		url      string
 		exported bool // set in the shell rather than in .env
 		wantErr  bool
 	}{
-		{name: "no password in .env", url: "postgres://admin@evil.example/postgres", wantErr: true},
-		{name: "password in .env", url: "postgres://admin:own@evil.example/postgres"},
-		{name: "no password, exported", url: "postgres://admin@db.example/postgres", exported: true},
+		{name: "no password in .env", url: dbURL(url.User("admin")), wantErr: true},
+		{name: "password in .env", url: dbURL(url.UserPassword("admin", "own"))},
+		{name: "no password, exported", url: dbURL(url.User("admin")), exported: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

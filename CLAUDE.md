@@ -153,7 +153,7 @@ Run all of these before calling a change done.
   environment win. `PG*` and `SSL_CERT_*` keys are skipped with a warning,
   so a checked-out `.env` can't redirect the admin connection; all other keys
   load. A `DATABASE_URL` from `.env` (`fromDotenv`) must carry its own
-  password: `requireOwnPassword` hides pgx's PGPASSWORD, passfile and service
+  password, so `requireOwnPassword` hides pgx's PGPASSWORD, passfile and service
   fallbacks while parsing it. `.env` is gitignored; `.env.example` shows the format.
 - All prompts in a command share one `prompter` (`internal/cli/prompt.go`):
   `bufio.Scanner` reads ahead, so a second scanner on stdin can lose input.
