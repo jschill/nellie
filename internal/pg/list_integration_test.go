@@ -5,6 +5,7 @@ package pg
 import (
 	"context"
 	"crypto/rand"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -89,6 +90,20 @@ func TestListProjects(t *testing.T) {
 	*dropUsers = append(*dropUsers, boss)
 	mustExec(t, admin, "CREATE ROLE "+ident(boss)+" LOGIN CREATEROLE")
 	mustExec(t, admin, "GRANT CONNECT ON DATABASE "+ident(p.Name)+" TO "+ident(boss))
+	// CREATEDB could create a database named like a user and so move it;
+	// mate gets it through membership; capped has a connection limit of 0.
+	maker, mate, capped := p.Name+"_maker", p.Name+"_mate", p.Name+"_capped"
+	*dropUsers = append(*dropUsers, maker, mate, capped)
+	for _, stmt := range []string{
+		"CREATE ROLE " + ident(maker) + " LOGIN CREATEDB",
+		"CREATE ROLE " + ident(mate) + " LOGIN IN ROLE " + ident(maker),
+		"CREATE ROLE " + ident(capped) + " LOGIN CONNECTION LIMIT 0",
+	} {
+		mustExec(t, admin, stmt)
+	}
+	for _, r := range []string{maker, mate, capped} {
+		mustExec(t, admin, "GRANT CONNECT ON DATABASE "+ident(p.Name)+" TO "+ident(r))
+	}
 	// Privileged through membership: in a CREATEROLE role, and in the owner
 	// of another database, which gives it that project too.
 	deputy, cross := p.Name+"_deputy", p.Name+"_cross"
@@ -209,6 +224,17 @@ func TestListProjects(t *testing.T) {
 	closedApp := closed + "_app"
 	*dropUsers = append(*dropUsers, closedApp)
 	mustExec(t, admin, "CREATE ROLE "+ident(closedApp)+" LOGIN")
+	// Same for a database whose connection limit is 0.
+	full := "nellie_it_" + strings.ToLower(rand.Text()[:8])
+	fullApp := full + "_app"
+	*dropUsers = append(*dropUsers, fullApp)
+	mustExec(t, admin, "CREATE DATABASE "+ident(full)+" CONNECTION LIMIT 0")
+	t.Cleanup(func() {
+		if _, err := admin.Exec(context.Background(), "DROP DATABASE IF EXISTS "+ident(full)); err != nil {
+			t.Errorf("dropping %s: %v", full, err)
+		}
+	})
+	mustExec(t, admin, "CREATE ROLE "+ident(fullApp)+" LOGIN")
 	t.Cleanup(func() {
 		if _, err := admin.Exec(context.Background(), "DROP DATABASE IF EXISTS "+ident(closed)); err != nil {
 			t.Errorf("dropping %s: %v", closed, err)
@@ -247,11 +273,14 @@ func TestListProjects(t *testing.T) {
 		p.Name: {Name: p.Name, Owner: p.Name, Users: []UserInfo{
 			{Name: p.Name + "_admin", Kind: AdminUser, CanConnect: true},
 			{Name: p.Name + "_app", Kind: AppUser, CanConnect: true},
-			{Name: p.Name + "_blogger", Kind: AppUser, Powers: "owner of " + blog, CanConnect: true},
-			{Name: p.Name + "_boss", Kind: AppUser, Powers: "CREATEROLE", CanConnect: true},
-			{Name: p.Name + "_cross", Kind: AppUser, Powers: "member of " + v2.Name, CanConnect: true},
-			{Name: p.Name + "_deputy", Kind: AppUser, Powers: "member of " + boss, CanConnect: true},
+			{Name: p.Name + "_blogger", Kind: AppUser, Powers: []string{"owner of " + blog}, CanConnect: true},
+			{Name: p.Name + "_boss", Kind: AppUser, Powers: []string{"CREATEROLE"}, CanConnect: true},
+			{Name: p.Name + "_capped", Kind: AppUser},
+			{Name: p.Name + "_cross", Kind: AppUser, Powers: []string{"member of " + v2.Name}, CanConnect: true},
+			{Name: p.Name + "_deputy", Kind: AppUser, Powers: []string{"member of " + boss}, CanConnect: true},
 			{Name: p.Name + "_future", Kind: AppUser, CanConnect: true},
+			{Name: p.Name + "_maker", Kind: AppUser, Powers: []string{"CREATEDB"}, CanConnect: true},
+			{Name: p.Name + "_mate", Kind: AppUser, Powers: []string{"member of " + maker}, CanConnect: true},
 			{Name: p.Name + "_noconnect", Kind: AppUser},
 			{Name: p.Name + "_old", Kind: AppUser, CanConnect: true, Expired: true},
 			{Name: p.Name + "_ops", Kind: AdminUser},
@@ -261,10 +290,13 @@ func TestListProjects(t *testing.T) {
 			{Name: v2.Name + "_other", Kind: AppUser},
 		}},
 		x: {Name: x, Owner: xOwner, Users: []UserInfo{
-			{Name: x, Kind: AdminUser, Powers: "member of " + xOwner, CanConnect: true},
+			{Name: x, Kind: AdminUser, Powers: []string{"member of " + xOwner}, CanConnect: true},
 		}},
 		closed: {Name: closed, Owner: cfg.User, Users: []UserInfo{
 			{Name: closedApp, Kind: AppUser},
+		}},
+		full: {Name: full, Owner: cfg.User, Users: []UserInfo{
+			{Name: fullApp, Kind: AppUser},
 		}},
 	}
 	for name, w := range want {
@@ -273,13 +305,21 @@ func TestListProjects(t *testing.T) {
 			t.Errorf("project %s missing from %+v", name, projects)
 			continue
 		}
-		if g.Owner != w.Owner || !slices.Equal(g.Users, w.Users) {
+		if g.Owner != w.Owner || !reflect.DeepEqual(g.Users, w.Users) {
 			t.Errorf("project %s:\n got %+v\nwant %+v", name, g, w)
 		}
 	}
+	// x's owner also owns x2, which the project line shows; p's owner owns
+	// nothing else.
+	if got := got[x].OwnerPowers; !reflect.DeepEqual(got, []string{"owner of " + x2}) {
+		t.Errorf("owner powers of %s = %q, want owner of %s", x, got, x2)
+	}
+	if got := got[p.Name].OwnerPowers; got != nil {
+		t.Errorf("owner powers of %s = %q, want none", p.Name, got)
+	}
 }
 
-// Value: protects=a project owner can't hijack the admin's list query by shadowing a catalog function in the database the admin connects to; fails_when=the SET search_path in ListProjects is removed or moved after the query; why_new=TestListProjects connects to postgres, whose public schema no project role controls; seam=none
+// Value: protects=a project owner can't hijack the admin's list query by shadowing a catalog function in the database the admin connects to; fails_when=pinSession stops pinning search_path, or ListProjects queries before pinSession; why_new=TestListProjects connects to postgres, whose public schema no project role controls; seam=none
 func TestListProjectsIgnoresShadowedFunctions(t *testing.T) {
 	ctx := context.Background()
 	cfg := adminConfig(t)
@@ -349,9 +389,35 @@ func TestListProjectsLeavesOutTheAdmin(t *testing.T) {
 	if slices.ContainsFunc(projects[i].Users, func(u UserInfo) bool { return u.Name == root }) {
 		t.Errorf("the admin %s is listed as a user of %s: %+v", root, p.Name, projects[i].Users)
 	}
+
+	// Value: protects=when the admin's own ALTER ROLE ... SET role (no IN DATABASE) makes it act as a project user, neither role is listed; fails_when=the session_user or current_user filter goes, or pinSession drops setdatabase 0; why_new=above, current_user = session_user; seam=none
+	t.Run("acting as another role", func(t *testing.T) {
+		app := p.Name + "_app"
+		*dropUsers = append(*dropUsers, app)
+		mustExec(t, admin, "CREATE ROLE "+ident(app)+" LOGIN")
+		mustExec(t, admin, "GRANT "+ident(p.Name)+" TO "+ident(app))
+		mustExec(t, admin, "GRANT "+ident(app)+" TO "+ident(root))
+		// For every database, so pg_db_role_setting holds it with setdatabase 0.
+		mustExec(t, admin, "ALTER ROLE "+ident(root)+" SET role = "+literal(app))
+
+		projects, err := ListProjects(ctx, rootCfg)
+		if err != nil {
+			t.Fatalf("ListProjects refused the admin's own role setting for all databases: %v", err)
+		}
+		i := slices.IndexFunc(projects, func(pr ProjectInfo) bool { return pr.Name == p.Name })
+		if i < 0 {
+			t.Fatalf("project %s missing from %+v", p.Name, projects)
+		}
+		for _, name := range []string{root, app} {
+			if slices.ContainsFunc(projects[i].Users, func(u UserInfo) bool { return u.Name == name }) {
+				t.Errorf("%s (session_user %s, current_user %s) is listed as a user of %s: %+v",
+					name, root, app, p.Name, projects[i].Users)
+			}
+		}
+	})
 }
 
-// Value: protects=superusers and members of predefined pg_* roles are listed as privileged, with what they have, not hidden or labeled application; fails_when=powers drops a case; why_new=new type; seam=none
+// Value: protects=SUPERUSER, REPLICATION, BYPASSRLS and membership in pg_* or REPLICATION/BYPASSRLS roles show as powers; fails_when=powers drops a case or reorders them; why_new=REPLICATION/BYPASSRLS were untested; seam=none
 func TestListProjectsFlagsPrivilegedRoles(t *testing.T) {
 	ctx := context.Background()
 	cfg := adminConfig(t)
@@ -370,11 +436,20 @@ func TestListProjectsFlagsPrivilegedRoles(t *testing.T) {
 
 	p, _, dropUsers := newTestProject(t, cfg)
 	su, mon := p.Name+"_su", p.Name+"_mon"
-	*dropUsers = append(*dropUsers, su, mon)
+	// rep has both attributes; repm and rlsm get one each through a
+	// NOLOGIN group, which isn't listed itself.
+	rep, repm, rlsm := p.Name+"_rep", p.Name+"_repm", p.Name+"_rlsm"
+	repGroup, rlsGroup := p.Name+"_repgroup", p.Name+"_rlsgroup"
+	*dropUsers = append(*dropUsers, su, mon, rep, repm, rlsm, repGroup, rlsGroup)
 	mustExec(t, admin, "CREATE ROLE "+ident(su)+" LOGIN SUPERUSER")
 	mustExec(t, admin, "CREATE ROLE "+ident(mon)+" LOGIN")
 	mustExec(t, admin, "GRANT pg_monitor TO "+ident(mon))
 	mustExec(t, admin, "GRANT CONNECT ON DATABASE "+ident(p.Name)+" TO "+ident(mon))
+	mustExec(t, admin, "CREATE ROLE "+ident(rep)+" LOGIN REPLICATION BYPASSRLS")
+	mustExec(t, admin, "CREATE ROLE "+ident(repGroup)+" NOLOGIN REPLICATION")
+	mustExec(t, admin, "CREATE ROLE "+ident(rlsGroup)+" NOLOGIN BYPASSRLS")
+	mustExec(t, admin, "CREATE ROLE "+ident(repm)+" LOGIN IN ROLE "+ident(repGroup))
+	mustExec(t, admin, "CREATE ROLE "+ident(rlsm)+" LOGIN IN ROLE "+ident(rlsGroup))
 
 	projects, err := ListProjects(ctx, cfg)
 	if err != nil {
@@ -386,17 +461,24 @@ func TestListProjectsFlagsPrivilegedRoles(t *testing.T) {
 	}
 	powers := map[string]string{}
 	for _, u := range projects[i].Users {
-		powers[u.Name] = u.Powers
+		powers[u.Name] = strings.Join(u.Powers, ", ")
 	}
-	if got := powers[su]; got != "SUPERUSER" {
-		t.Errorf("powers of superuser %s = %q, want SUPERUSER", su, got)
+	for name, want := range map[string]string{
+		su:   "SUPERUSER",
+		rep:  "REPLICATION, BYPASSRLS",
+		repm: "member of " + repGroup,
+		rlsm: "member of " + rlsGroup,
+	} {
+		if got := powers[name]; got != want {
+			t.Errorf("powers of %s = %q, want %q", name, got, want)
+		}
 	}
 	if got := powers[mon]; !strings.HasPrefix(got, "member of pg_monitor") {
 		t.Errorf("powers of %s = %q, want membership in pg_monitor", mon, got)
 	}
 }
 
-// Value: protects=nellie refuses a connection database whose owner made every session act as another role, rather than listing or rotating as that role; fails_when=pinSession stops checking; why_new=red team; seam=none
+// Value: protects=nellie refuses a connection database whose owner made every session act as another role, rather than listing or rotating as that role; fails_when=pinSession stops checking, or counts the admin's setting for another database; why_new=red team; seam=none
 func TestPinSessionRefusesDatabaseRole(t *testing.T) {
 	ctx := context.Background()
 	cfg := adminConfig(t)
@@ -409,11 +491,15 @@ func TestPinSessionRefusesDatabaseRole(t *testing.T) {
 	t.Cleanup(func() { admin.Close(context.Background()) })
 	// What p's owner can do to its own database.
 	mustExec(t, admin, "ALTER DATABASE "+ident(p.Name)+" SET role = "+literal(p.Name))
+	// The admin's own setting for another database doesn't explain it.
+	other, _, _ := newTestProject(t, cfg)
+	mustExec(t, admin, "ALTER ROLE "+ident(cfg.User)+" IN DATABASE "+ident(other.Name)+" SET role = "+literal(p.Name))
 
 	inProject := cfg.Copy()
 	inProject.Database = p.Name
-	if _, err := ListProjects(ctx, inProject); err == nil || !strings.Contains(err.Error(), "acts as role "+strconv.Quote(p.Name)) {
-		t.Errorf("ListProjects: got %v, want a refusal naming role %s", err, p.Name)
+	if _, err := ListProjects(ctx, inProject); err == nil || !strings.Contains(err.Error(), "acts as role "+strconv.Quote(p.Name)) ||
+		!strings.Contains(err.Error(), "ALTER DATABASE") {
+		t.Errorf("ListProjects: got %v, want a refusal naming role %s and ALTER DATABASE", err, p.Name)
 	}
 	if _, err := RotatePassword(ctx, inProject, p.Name, NewPassword()); err == nil || !strings.Contains(err.Error(), "acts as role") {
 		t.Errorf("RotatePassword: got %v, want the same refusal", err)
@@ -453,7 +539,75 @@ func TestPinSessionAllowsAdminsOwnRole(t *testing.T) {
 	// Connected to p, its admin user is a member of pg_database_owner, which
 	// is no power beyond the project.
 	i := slices.IndexFunc(projects, func(pr ProjectInfo) bool { return pr.Name == p.Name })
-	if i < 0 || !slices.Equal(projects[i].Users, []UserInfo{{Name: u.Name, Kind: AdminUser, CanConnect: true}}) {
+	if i < 0 || !reflect.DeepEqual(projects[i].Users, []UserInfo{{Name: u.Name, Kind: AdminUser, CanConnect: true}}) {
 		t.Errorf("project %s: got %+v, want only %s as an unprivileged admin user", p.Name, projects, u.Name)
+	}
+}
+
+// Value: protects=a superuser admin doesn't see template0/template1 or an invalid database as projects, and an invalid database's users don't fall to a shorter one; fails_when=a datconnlimit or name filter changes; why_new=only a non-superuser admin ran list; seam=none
+func TestListProjectsLeavesOutSystemAndInvalidDatabases(t *testing.T) {
+	ctx := context.Background()
+	cfg := adminConfig(t)
+	admin, err := pgx.ConnectConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { admin.Close(context.Background()) })
+	var super bool
+	if err := admin.QueryRow(ctx, "SELECT rolsuper FROM pg_roles WHERE rolname = current_user").Scan(&super); err != nil {
+		t.Fatal(err)
+	}
+	if !super {
+		t.Skip("only a superuser admin can act for template0's owner, or mark a database invalid")
+	}
+
+	p, _, dropUsers := newTestProject(t, cfg)
+	// gone is what an interrupted DROP DATABASE leaves behind: datconnlimit
+	// -2, which only that (or a superuser's UPDATE) sets. It isn't a project,
+	// but its app user still belongs to it by name, so it doesn't fall
+	// through to p.
+	gone, goneApp := p.Name+"_gone", p.Name+"_gone_app"
+	*dropUsers = append(*dropUsers, goneApp)
+	mustExec(t, admin, "CREATE DATABASE "+ident(gone))
+	t.Cleanup(func() {
+		if _, err := admin.Exec(context.Background(), "DROP DATABASE IF EXISTS "+ident(gone)); err != nil {
+			t.Errorf("dropping %s: %v", gone, err)
+		}
+	})
+	mustExec(t, admin, "UPDATE pg_database SET datconnlimit = -2 WHERE datname = "+literal(gone))
+	mustExec(t, admin, "CREATE ROLE "+ident(goneApp)+" LOGIN")
+
+	projects, err := ListProjects(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, pr := range projects {
+		switch pr.Name {
+		case "template0", "template1", gone:
+			t.Errorf("listed %s as a project", pr.Name)
+		case p.Name:
+			if len(pr.Users) != 0 {
+				t.Errorf("project %s: users %+v, want none (%s belongs to %s)", p.Name, pr.Users, goneApp, gone)
+			}
+		}
+	}
+	if !slices.ContainsFunc(projects, func(pr ProjectInfo) bool { return pr.Name == p.Name }) {
+		t.Errorf("project %s missing from %+v", p.Name, projects)
+	}
+}
+
+// Value: protects=a role switch from the admin's own connection settings is refused and blamed on them, not on ALTER DATABASE; fails_when=pinSession allows it or always blames the database; why_new=red team: the advice was wrong; seam=none
+func TestPinSessionNamesConnectionRole(t *testing.T) {
+	ctx := context.Background()
+	cfg := adminConfig(t)
+	p, _, _ := newTestProject(t, cfg)
+
+	// As if DATABASE_URL said ?options=-c role=<p> (or role=<p>).
+	c := cfg.Copy()
+	c.RuntimeParams["role"] = p.Name
+	_, err := ListProjects(ctx, c)
+	if err == nil || !strings.Contains(err.Error(), "acts as role "+strconv.Quote(p.Name)) ||
+		!strings.Contains(err.Error(), "connection settings") || strings.Contains(err.Error(), "ALTER DATABASE") {
+		t.Errorf("ListProjects: got %v, want a refusal blaming the connection settings", err)
 	}
 }

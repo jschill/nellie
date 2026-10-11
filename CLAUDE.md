@@ -81,13 +81,19 @@ out by name. Users are the `LOGIN` roles named `<db>_*` (or exactly `<db>`),
 assigned by name alone to the longest matching database among all of them.
 Never assign by CONNECT or membership: some database owner controls those,
 and every such rule let an owner hide or move roles (three review passes, see
-JSC-3). A role that can't connect gets a `can_connect: false` note; a role
-whose database isn't visible isn't listed. The owner (by OID) and the admin
+JSC-3). A role that can't connect (`datallowconn`, connection limits of 0
+on the database or role unless superuser, and CONNECT) gets a
+`can_connect: false` note; a role whose database isn't visible, or is
+invalid, isn't listed. The owner (by OID) and the admin
 itself are never users. Types: `admin` is `'MEMBER'` of the owner, on purpose
 (a NOINHERIT member can still `SET ROLE` to it); `privileged` has what
-`rotate-password` refuses, or owns another database (directly or through
-membership; compare database OIDs, not owner OIDs), listed in `powers`;
-`can_connect` needs `datallowconn` as well as CONNECT; the rest are `application`. It runs `pg.ListSQL` (one query, no
+`rotate-password` refuses, `CREATEDB` (it could create a database that
+matches a user's name), or owns another database (directly or through
+membership; compare database OIDs, not owner OIDs), listed in `powers`, one
+power per array element so a name containing ", " can't fake one; the rest
+are `application`. The owner's powers are computed the same way
+(`owner_powers`). On Postgres 15 an owner can revoke the admin's membership
+and so drop out of `list`; that's documented, not handled. It runs `pg.ListSQL` (one query, no
 bind parameters) after `pinSession` and the version check; `--dry-run` prints
 the pin and the query (`pg.ListScript`).
 
@@ -95,7 +101,8 @@ the pin and the query (`pg.ListScript`).
 `list` (not yet `add-*`): it pins `search_path` and refuses a session acting as
 another role unless the admin's own `ALTER ROLE ... SET role` explains it. It
 fails closed on purpose: checking the database's `role` setting instead races
-with its owner clearing it.
+with its owner clearing it. That setting only picks the error's advice
+(`ALTER DATABASE` vs a role in the connection settings).
 
 Common flags, registered on every subcommand's FlagSet: `--dry-run`, and
 `--json` where output is data (e.g. `list`). No `--dsn`: a connection string

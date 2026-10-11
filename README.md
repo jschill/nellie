@@ -233,25 +233,35 @@ shop  (owner shop)
 A project is any database whose owner the admin role is, or whose owner's
 privileges it has through membership (the same rule `add-user` uses), so
 databases nellie didn't create show up too. Templates and databases closed to
-connections are included, since their owner can switch those settings; only
-Postgres's own `template0` and `template1` are left out.
+connections are included, since their owner can switch those settings. Left
+out are Postgres's own `template0` and `template1`, and invalid databases
+that an interrupted `DROP DATABASE` leaves behind.
 
-Its users are the login roles named `<project>_<something>`. Names alone
+Its users are the login roles named `<project>_<something>`, or exactly
+`<project>` when that role isn't the owner. Names alone
 decide where a role goes: the longest database its name matches, so
 `shop_v2_app` goes under `shop_v2`, not `shop`. Who may connect is up to each
 database's owner, so it doesn't move roles around. A role that can't connect
 is listed with a `can't connect` note instead, which also covers databases
-closed to connections. A role whose database the admin
-can't see isn't listed at all. A project's owner is shown as its owner, never
+closed to connections and connection limits of 0. A role whose database the
+admin can't see isn't listed at all. A project's owner is shown as its owner, never
 as a user, and the admin role itself isn't listed. There are three types:
 
 - `admin`: a member of the owner role, including one that has to
   `SET ROLE` first to use the owner's privileges.
 - `privileged`: a role with powers beyond the project, shown next to it:
-  `SUPERUSER`, `CREATEROLE`, `REPLICATION`, `BYPASSRLS`, membership in a
-  role that has them or in a predefined `pg_*` role, or owning another
-  database (directly or through membership in its owner).
+  `SUPERUSER`, `CREATEROLE`, `CREATEDB`, `REPLICATION`, `BYPASSRLS`,
+  membership in a role that has them or in a predefined `pg_*` role, or
+  owning another database (directly or through membership in its owner).
 - `application`: anyone else.
+
+An owner with such powers is marked on the project line too, for example
+`shop  (owner shop, privileged: CREATEDB)`.
+
+On Postgres 15, a project's owner can revoke the admin's membership in its
+role, and the project then drops out of `list` (Postgres 16 and later don't
+allow that). If a project you expect is missing on Postgres 15, check with
+`psql` whether the admin is still a member of its owner.
 
 `list` only reads, and never shows passwords or connection URLs.
 
@@ -261,7 +271,7 @@ as a user, and the admin role itself isn't listed. There are three types:
 | --- | --- |
 | `--dry-run` | Print the SQL instead of running it. Doesn't connect. Passwords show as `<redacted>`. All commands (for `list`, the query it runs, after pinning `search_path`). |
 | `--generate` | Generate the new password without asking. `rotate-password` only. |
-| `--json` | Print the result as JSON, not together with `--dry-run`. `rotate-password`: `user`; `database` and `url` when the project database is found; `password` only if nellie generated it. `list`: an array of `{"project", "owner", "users": [{"name", "type", "powers", "can_connect", "expired"}]}`, where `type` is `application`, `admin` or `privileged`, and `powers` says why (`""` otherwise). |
+| `--json` | Print the result as JSON, not together with `--dry-run`. `rotate-password`: `user`; `database` and `url` when the project database is found; `password` only if nellie generated it. `list`: an array of `{"project", "owner", "owner_powers", "users": [{"name", "type", "powers", "can_connect", "expired"}]}`, where `type` is `application`, `admin` or `privileged`, and `powers` and `owner_powers` are arrays with one power each (`[]` for none). |
 
 Flags can go before or after the user name.
 

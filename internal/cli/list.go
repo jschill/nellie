@@ -19,17 +19,19 @@ import (
 
 const listHelp = `Lists the projects the admin role can act for: the databases it owns, or
 whose owner's privileges it has through membership. Under each project come
-its users, the login roles named <project>_<something>; a role goes under the
-longest database its name matches, and a note says when it can't connect:
+its users, the login roles named <project>_<something> (or exactly <project>,
+when that role isn't the owner); a role goes under the longest database its
+name matches, and a note says when it can't connect:
 
   application  any other user, such as one made by "nellie add-user"
                as an application user, which reads and writes rows
   admin        a member of the owner role, so it has (or can take) the
                owner's privileges and can do everything
   privileged   has powers beyond the project, shown next to it: SUPERUSER,
-               CREATEROLE, REPLICATION, BYPASSRLS, or membership in a role
-               that has them, in a predefined pg_* role, or owning another
-               database or membership in its owner
+               CREATEROLE, CREATEDB, REPLICATION, BYPASSRLS, membership in
+               a role that has them or in a predefined pg_* role, or owning
+               another database (directly or through membership). An owner
+               with such powers is marked on the project line.
 
 The admin role itself isn't listed as a user. It only reads, and shows no
 passwords. Also known as "nellie trumpet".
@@ -38,17 +40,18 @@ passwords. Also known as "nellie trumpet".
 // listProject and listUser are the --json output. Like rotateResult, the
 // field names in the tags are a stable interface.
 type listProject struct {
-	Project string     `json:"project"`
-	Owner   string     `json:"owner"`
-	Users   []listUser `json:"users"`
+	Project     string     `json:"project"`
+	Owner       string     `json:"owner"`
+	OwnerPowers []string   `json:"owner_powers"` // the owner's powers beyond the project, [] for none
+	Users       []listUser `json:"users"`
 }
 
 type listUser struct {
-	Name       string `json:"name"`
-	Type       string `json:"type"`        // "application", "admin" or "privileged"
-	Powers     string `json:"powers"`      // why it's privileged, "" if it isn't
-	CanConnect bool   `json:"can_connect"` // may connect to the project's database
-	Expired    bool   `json:"expired"`     // VALID UNTIL has passed: the password no longer works
+	Name       string   `json:"name"`
+	Type       string   `json:"type"`        // "application", "admin" or "privileged"
+	Powers     []string `json:"powers"`      // why it's privileged, one per element; [] if it isn't
+	CanConnect bool     `json:"can_connect"` // may connect to the project's database
+	Expired    bool     `json:"expired"`     // VALID UNTIL has passed: the password no longer works
 }
 
 func list(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
@@ -99,26 +102,43 @@ func list(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 func listJSON(projects []pg.ProjectInfo) []listProject {
 	res := make([]listProject, 0, len(projects))
 	for _, p := range projects {
-		lp := listProject{Project: p.Name, Owner: p.Owner, Users: make([]listUser, 0, len(p.Users))}
+		lp := listProject{Project: p.Name, Owner: p.Owner, OwnerPowers: nonNil(p.OwnerPowers), Users: make([]listUser, 0, len(p.Users))}
 		for _, u := range p.Users {
-			lp.Users = append(lp.Users, listUser{Name: u.Name, Type: userType(u), Powers: u.Powers, CanConnect: u.CanConnect, Expired: u.Expired})
+			lp.Users = append(lp.Users, listUser{Name: u.Name, Type: userType(u), Powers: nonNil(u.Powers), CanConnect: u.CanConnect, Expired: u.Expired})
 		}
 		res = append(res, lp)
 	}
 	return res
 }
 
+// nonNil returns s, or an empty slice for nil, so --json writes [] (see listJSON).
+func nonNil(s []string) []string {
+	if s == nil {
+		return []string{}
+	}
+	return s
+}
+
+// powersNote joins powers for the human output, each escaped on its own.
+func powersNote(powers []string) string {
+	shown := make([]string, len(powers))
+	for i, p := range powers {
+		shown[i] = printable(p)
+	}
+	return strings.Join(shown, ", ")
+}
+
 // userType names a user's type for both outputs: "privileged" when it has
 // powers beyond the project, whatever its membership, else its kind.
 func userType(u pg.UserInfo) string {
-	if u.Powers != "" {
+	if len(u.Powers) > 0 {
 		return "privileged"
 	}
 	return u.Kind.String()
 }
 
 // printList writes the human output: each project with its owner, then its
-// users in aligned columns.
+// users in aligned columns (name, type, notes).
 func printList(w io.Writer, projects []pg.ProjectInfo) {
 	if len(projects) == 0 {
 		fmt.Fprintln(w, `The big top is empty: the admin role can't act for any project yet. Make one with "nellie add-project".`)
@@ -126,20 +146,27 @@ func printList(w io.Writer, projects []pg.ProjectInfo) {
 	}
 	// A tabwriter pads tab-separated cells so columns line up. Lines without
 	// a tab (the project lines) end a block, so each project aligns on its own.
-	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	// Every user line has all three cells, even with no notes, so the notes
+	// line up too; the padding that leaves at line ends is trimmed below.
+	var buf bytes.Buffer
+	tw := tabwriter.NewWriter(&buf, 0, 0, 2, ' ', 0)
 	for i, p := range projects {
 		if i > 0 {
 			fmt.Fprintln(tw)
 		}
-		fmt.Fprintf(tw, "%s  (owner %s)\n", printable(p.Name), printable(p.Owner))
+		owner := printable(p.Owner)
+		if len(p.OwnerPowers) > 0 {
+			owner += ", privileged: " + powersNote(p.OwnerPowers)
+		}
+		fmt.Fprintf(tw, "%s  (owner %s)\n", printable(p.Name), owner)
 		if len(p.Users) == 0 {
 			fmt.Fprintln(tw, `  no users yet; add one with "nellie add-user"`)
 		}
 		for _, u := range p.Users {
 			fmt.Fprintf(tw, "  %s\t%s", printable(u.Name), userType(u))
 			var notes []string
-			if u.Powers != "" {
-				notes = append(notes, printable(u.Powers))
+			if len(u.Powers) > 0 {
+				notes = append(notes, powersNote(u.Powers))
 			}
 			if !u.CanConnect {
 				notes = append(notes, "can't connect")
@@ -147,13 +174,13 @@ func printList(w io.Writer, projects []pg.ProjectInfo) {
 			if u.Expired {
 				notes = append(notes, "password expired (VALID UNTIL)")
 			}
-			if len(notes) > 0 {
-				fmt.Fprint(tw, "\t"+strings.Join(notes, "; "))
-			}
-			fmt.Fprintln(tw)
+			fmt.Fprintln(tw, "\t"+strings.Join(notes, "; "))
 		}
 	}
 	tw.Flush()
+	for line := range strings.Lines(buf.String()) {
+		fmt.Fprintln(w, strings.TrimRight(line, " \n"))
+	}
 }
 
 // printable returns name as is, or quoted with escapes if it holds characters

@@ -50,24 +50,34 @@ func pinSession(ctx context.Context, conn *pgx.Conn) error {
 		return fmt.Errorf("setting search_path: %w", err)
 	}
 	var db, current, session string
-	var switched bool
+	var switched, byDatabase bool
 	err := conn.QueryRow(ctx, `
 		SELECT current_database(), current_user, session_user,
 			current_user <> session_user AND NOT EXISTS (
 				SELECT FROM pg_db_role_setting s
 				WHERE s.setrole = (SELECT oid FROM pg_roles WHERE rolname = session_user)
 					AND s.setdatabase IN (0, (SELECT oid FROM pg_database WHERE datname = current_database()))
-					AND 'role=' || current_user = ANY (s.setconfig))`,
-	).Scan(&db, &current, &session, &switched)
+					AND 'role=' || current_user = ANY (s.setconfig)),
+			EXISTS (
+				SELECT FROM pg_db_role_setting s
+				WHERE s.setrole = 0
+					AND s.setdatabase = (SELECT oid FROM pg_database WHERE datname = current_database())
+					AND EXISTS (SELECT FROM unnest(s.setconfig) c WHERE starts_with(c, 'role=')))`,
+	).Scan(&db, &current, &session, &switched, &byDatabase)
 	if err != nil {
 		return fmt.Errorf("checking the session's role: %w", err)
 	}
 	if switched {
+		// The refusal above doesn't depend on this, so a racing owner can
+		// only change the advice, not whether nellie refuses.
+		cause := "a role or options parameter in the connection settings (DATABASE_URL or PGOPTIONS); remove it"
+		if byDatabase {
+			cause = fmt.Sprintf("ALTER DATABASE %q SET role, which the database's owner controls; connect the admin to another database, such as postgres", db)
+		}
 		// %q: the names come from the catalog, and the database's owner picks
 		// the role, so they're quoted rather than sent to the terminal raw.
-		return fmt.Errorf("the session acts as role %q instead of %q, and the admin's own role settings don't explain it "+
-			"(an ALTER DATABASE %q SET role does, which the database's owner controls); connect the admin to another database, such as postgres",
-			current, session, db)
+		return fmt.Errorf("the session acts as role %q instead of %q, and the admin's own role settings don't explain it; "+
+			"the likely cause is %s", current, session, cause)
 	}
 	return nil
 }

@@ -9,6 +9,8 @@ import (
 	"encoding/json"
 	"os"
 	"reflect"
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -91,10 +93,18 @@ func TestListCommand(t *testing.T) {
 		}
 		want := []listProject{
 			{Project: empty, Owner: adminCfg.User, Users: []listUser{}},
-			{Project: full, Owner: adminCfg.User, Users: []listUser{{Name: user, Type: "application", CanConnect: true}}},
+			{Project: full, Owner: adminCfg.User, Users: []listUser{{Name: user, Type: "application", Powers: []string{}, CanConnect: true}}},
 		}
 		for _, w := range want {
-			if g := byName[w.Project]; !reflect.DeepEqual(g, w) {
+			g := byName[w.Project]
+			// The admin owns both databases, and its powers depend on the
+			// server (CREATEDB at least, other databases it owns); only
+			// check that it's flagged.
+			if !slices.Contains(g.OwnerPowers, "CREATEDB") {
+				t.Errorf("owner powers of %s = %q, want CREATEDB among them", w.Project, g.OwnerPowers)
+			}
+			g.OwnerPowers = nil
+			if !reflect.DeepEqual(g, w) {
 				t.Errorf("got  %+v\nwant %+v", g, w)
 			}
 		}
@@ -113,12 +123,14 @@ func TestListCommand(t *testing.T) {
 
 	t.Run("trumpet, human", func(t *testing.T) {
 		out := run(t, "trumpet")
-		for _, block := range []string{
-			empty + "  (owner " + adminCfg.User + ")\n  no users yet; add one with \"nellie add-user\"\n",
-			full + "  (owner " + adminCfg.User + ")\n  " + user + "  application\n",
+		// The admin owns both databases, so their project lines also list its
+		// powers, which depend on the server: match up to them.
+		for _, re := range []string{
+			`(?m)^` + empty + `  \(owner ` + adminCfg.User + `, privileged: .*\)\n  no users yet; add one with "nellie add-user"\n`,
+			`(?m)^` + full + `  \(owner ` + adminCfg.User + `, privileged: .*\)\n  ` + user + `  application\n`,
 		} {
-			if !strings.Contains(out, block) {
-				t.Errorf("output lacks\n%s\ngot:\n%s", block, out)
+			if !regexp.MustCompile(re).MatchString(out) {
+				t.Errorf("output doesn't match\n%s\ngot:\n%s", re, out)
 			}
 		}
 	})

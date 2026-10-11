@@ -42,24 +42,24 @@ func TestListUsageErrors(t *testing.T) {
 	}
 }
 
-// Value: protects=the human output aligns users, shows powers and expiry notes, says when there are no users, and escapes control characters; fails_when=the layout changes, an empty note column adds trailing spaces, or a raw escape sequence reaches the terminal; why_new=new code; seam=none
+// Value: protects=the human output aligns users and their notes (also across a user without notes), shows powers and expiry, says when there are no users, and escapes control characters; fails_when=the layout changes, an empty note column adds trailing spaces, or a raw escape sequence reaches the terminal; why_new=new code; seam=none
 func TestPrintList(t *testing.T) {
 	var out bytes.Buffer
 	printList(&out, []pg.ProjectInfo{
 		{Name: "blog", Owner: "blog"},
-		{Name: "shop", Owner: "alice", Users: []pg.UserInfo{
-			{Name: "shop_admin", Kind: pg.AdminUser, CanConnect: true},
+		{Name: "shop", Owner: "alice", OwnerPowers: []string{"CREATEDB", "owner of blog"}, Users: []pg.UserInfo{
 			{Name: "shop_app", Kind: pg.AppUser, CanConnect: true, Expired: true},
-			{Name: "shop_boss", Kind: pg.AdminUser, Powers: "CREATEROLE, member of pg_monitor", Expired: true},
+			{Name: "shop_admin", Kind: pg.AdminUser, CanConnect: true},
+			{Name: "shop_boss", Kind: pg.AdminUser, Powers: []string{"CREATEROLE", "member of pg_monitor"}, Expired: true},
 			{Name: "shop_\x1b[2J", Kind: pg.AppUser, CanConnect: true},
 		}},
 	})
 	want := `blog  (owner blog)
   no users yet; add one with "nellie add-user"
 
-shop  (owner alice)
-  shop_admin      admin
+shop  (owner alice, privileged: CREATEDB, owner of blog)
   shop_app        application  password expired (VALID UNTIL)
+  shop_admin      admin
   shop_boss       privileged   CREATEROLE, member of pg_monitor; can't connect; password expired (VALID UNTIL)
   "shop_\x1b[2J"  application
 `
@@ -74,7 +74,7 @@ shop  (owner alice)
 	}
 }
 
-// Value: protects=the --json shape scripts rely on: field names, the three type names, [] rather than null; fails_when=a tag or type name changes, privileged loses to the kind, or a nil slice reaches the encoder; why_new=new code; seam=none
+// Value: protects=the --json shape scripts rely on: field names, the three type names, powers as arrays (a ", " in a name stays in one element), [] not null; fails_when=a tag or type name changes, privileged loses to the kind, or a nil slice reaches the encoder; why_new=new code; seam=none
 func TestListJSON(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -82,15 +82,15 @@ func TestListJSON(t *testing.T) {
 		want     string
 	}{
 		{"no projects", nil, `[]`},
-		{"no users", []pg.ProjectInfo{{Name: "blog", Owner: "blog"}}, `[{"project":"blog","owner":"blog","users":[]}]`},
+		{"no users", []pg.ProjectInfo{{Name: "blog", Owner: "blog"}}, `[{"project":"blog","owner":"blog","owner_powers":[],"users":[]}]`},
 		{"users", []pg.ProjectInfo{{Name: "shop", Owner: "shop", Users: []pg.UserInfo{
 			{Name: "shop_admin", Kind: pg.AdminUser},
 			{Name: "shop_app", Kind: pg.AppUser, CanConnect: true, Expired: true},
-			{Name: "shop_boss", Kind: pg.AdminUser, Powers: "CREATEROLE"},
-		}}}, `[{"project":"shop","owner":"shop","users":[` +
-			`{"name":"shop_admin","type":"admin","powers":"","can_connect":false,"expired":false},` +
-			`{"name":"shop_app","type":"application","powers":"","can_connect":true,"expired":true},` +
-			`{"name":"shop_boss","type":"privileged","powers":"CREATEROLE","can_connect":false,"expired":false}]}]`},
+			{Name: "shop_boss", Kind: pg.AdminUser, Powers: []string{"CREATEROLE", "member of x, y"}},
+		}}}, `[{"project":"shop","owner":"shop","owner_powers":[],"users":[` +
+			`{"name":"shop_admin","type":"admin","powers":[],"can_connect":false,"expired":false},` +
+			`{"name":"shop_app","type":"application","powers":[],"can_connect":true,"expired":true},` +
+			`{"name":"shop_boss","type":"privileged","powers":["CREATEROLE","member of x, y"],"can_connect":false,"expired":false}]}]`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
