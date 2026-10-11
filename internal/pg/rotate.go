@@ -34,6 +34,10 @@ type Rotation struct {
 	// Expired means the role's VALID UNTIL has passed. A new password doesn't
 	// change that, so the new password won't work either.
 	Expired bool
+	// Powers is what the role can do beyond its project that rotate-password
+	// doesn't refuse (CREATEDB, owning another database, ...), as nellie list
+	// shows it; nil for none. The new password carries those too.
+	Powers []string
 }
 
 // RotatePassword sets a new password for role on the server described by cfg.
@@ -80,7 +84,8 @@ func RotatePassword(ctx context.Context, cfg *pgx.ConnConfig, role, password str
 	// The password has changed by now, so a failed lookup mustn't read as a
 	// failed rotation: without a database the caller just prints no URL.
 	db, _ := projectDatabase(ctx, admin, role)
-	return Rotation{Database: db, Expired: expired}, nil
+	powers, _ := rolePowers(ctx, admin, role, db)
+	return Rotation{Database: db, Expired: expired, Powers: powers}, nil
 }
 
 // checkRotatable refuses roles whose password nellie shouldn't change:
@@ -142,24 +147,47 @@ func checkRotatable(ctx context.Context, conn *pgx.Conn, role string) (expired b
 	return expired, nil
 }
 
-// projectDatabase returns the longest of role's projectCandidates that is an
-// existing database role can connect to, or "" if there's none. The CONNECT
-// check matters when projects share a prefix: user shop_v2_app of project
-// shop must not get a URL for project shop_v2.
+// projectDatabase returns role's project database for the connection URL,
+// or "" for none. It's the longest of role's projectCandidates that exists,
+// by name alone, as nellie list decides (see ListSQL): picking by CONNECT
+// would let a CREATEDB role create a database named like the role, which
+// PUBLIC can connect to, and the URL with the new password would point there.
+// A URL is only given when that database is one of the admin's projects and
+// the role can connect to it; otherwise "" rather than a shorter database.
 func projectDatabase(ctx context.Context, conn *pgx.Conn, role string) (string, error) {
 	var db string
+	var usable bool
 	err := conn.QueryRow(ctx, `
-		SELECT datname FROM pg_database
-		WHERE datname = ANY($1::text[]) AND NOT datistemplate
-			AND datallowconn AND datconnlimit <> -2 -- -2 marks an invalid database
-			AND has_database_privilege($2::name, oid, 'CONNECT')
+		SELECT datname,
+			datname NOT IN ('template0', 'template1') AND datconnlimit <> -2 -- -2 marks an invalid database
+				AND pg_has_role(datdba, 'USAGE') AND datallowconn
+				AND has_database_privilege($2::name, oid, 'CONNECT')
+		FROM pg_database
+		WHERE datname = ANY($1::text[])
 		ORDER BY length(datname) DESC LIMIT 1`,
 		projectCandidates(role), role,
-	).Scan(&db)
-	if errors.Is(err, pgx.ErrNoRows) {
+	).Scan(&db, &usable)
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && !usable) {
 		return "", nil
 	}
 	return db, err
+}
+
+// rolePowers returns role's powers beyond db (its project database, or ""),
+// computed as for nellie list (powersExpr); nil for none.
+func rolePowers(ctx context.Context, conn *pgx.Conn, role, db string) ([]string, error) {
+	var powers []string
+	err := conn.QueryRow(ctx, `WITH `+poweredCTE+`
+		SELECT `+powersExpr+`
+		FROM pg_roles r,
+			(SELECT coalesce((SELECT oid FROM pg_database WHERE datname = $2), 0) AS project) s
+		WHERE r.rolname = $1`,
+		role, db,
+	).Scan(&powers)
+	if err != nil {
+		return nil, fmt.Errorf("looking up the powers of role %s: %w", role, err)
+	}
+	return noneIfEmpty(powers), nil
 }
 
 // projectCandidates lists the databases role might belong to, longest first:

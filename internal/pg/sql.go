@@ -70,7 +70,7 @@ func pinSession(ctx context.Context, conn *pgx.Conn) error {
 	if switched {
 		// The refusal above doesn't depend on this, so a racing owner can
 		// only change the advice, not whether nellie refuses.
-		cause := "a role or options parameter in the connection settings (DATABASE_URL or PGOPTIONS); remove it"
+		cause := "a role or options parameter in the admin's connection settings (the URL, PGOPTIONS or a service file); remove it"
 		if byDatabase {
 			cause = fmt.Sprintf("ALTER DATABASE %q SET role, which the database's owner controls; connect the admin to another database, such as postgres", db)
 		}

@@ -177,7 +177,13 @@ New password (input hidden; empty generates one):
 
 Press Enter (or pass `--generate`) and nellie generates one and prints it
 once, in a connection URL (or on its own line if nellie can't tell which
-project database the role belongs to).
+project database the role belongs to). Like `list`, nellie picks that
+database by name: the longest database the role's name matches. It only
+gives a URL when that database is one of the admin's projects and the role
+can connect to it, so nobody can point your app somewhere else by creating
+a database with a matching name. If the role has powers beyond its project
+(see `list`'s `privileged` users), nellie warns you: the new password
+carries them too.
 Or type your own: it's asked twice, and never printed back. Typed passwords
 are limited to printable ASCII (see [Passwords](#passwords)).
 
@@ -214,7 +220,9 @@ expires the password: the new one won't work until that's cleared.
 than the admin, unless the admin's own settings say so (`ALTER ROLE ... SET
 role`). A database's owner can set a role for every session there (`ALTER
 DATABASE ... SET role`), and nellie would then see and do only what that role
-can. Connect the admin to another database, such as `postgres`.
+can. Connect the admin to another database, such as `postgres`. A `role` or
+`options` parameter in the admin's own connection settings (the URL,
+`PGOPTIONS` or a service file) is refused the same way; remove it.
 
 ### `nellie list`
 
@@ -243,8 +251,11 @@ decide where a role goes: the longest database its name matches, so
 `shop_v2_app` goes under `shop_v2`, not `shop`. Who may connect is up to each
 database's owner, so it doesn't move roles around. A role that can't connect
 is listed with a `can't connect` note instead, which also covers databases
-closed to connections and connection limits of 0. A role whose database the
-admin can't see isn't listed at all. A project's owner is shown as its owner, never
+closed to connections and connection limits of 0. A role whose own database
+the admin can't act for (someone with `CREATEDB` could create one named like
+your user) is shown under the longest project its name matches, with a
+`belongs to database ...` note, so it can't silently disappear. A project's
+owner is shown as its owner, never
 as a user, and the admin role itself isn't listed. There are three types:
 
 - `admin`: a member of the owner role, including one that has to
@@ -256,7 +267,9 @@ as a user, and the admin role itself isn't listed. There are three types:
 - `application`: anyone else.
 
 An owner with such powers is marked on the project line too, for example
-`shop  (owner shop, privileged: CREATEDB)`.
+`shop  (owner shop, privileged: CREATEDB)`. A role with `CREATEROLE` is a
+member of every role it created, so for those (and superusers) the
+memberships aren't listed: they'd bury the real powers.
 
 On Postgres 15, a project's owner can revoke the admin's membership in its
 role, and the project then drops out of `list` (Postgres 16 and later don't
@@ -271,7 +284,7 @@ allow that). If a project you expect is missing on Postgres 15, check with
 | --- | --- |
 | `--dry-run` | Print the SQL instead of running it. Doesn't connect. Passwords show as `<redacted>`. All commands (for `list`, the query it runs, after pinning `search_path`). |
 | `--generate` | Generate the new password without asking. `rotate-password` only. |
-| `--json` | Print the result as JSON, not together with `--dry-run`. `rotate-password`: `user`; `database` and `url` when the project database is found; `password` only if nellie generated it. `list`: an array of `{"project", "owner", "owner_powers", "users": [{"name", "type", "powers", "can_connect", "expired"}]}`, where `type` is `application`, `admin` or `privileged`, and `powers` and `owner_powers` are arrays with one power each (`[]` for none). |
+| `--json` | Print the result as JSON, not together with `--dry-run`. `rotate-password`: `user`; `database` and `url` when the project database is found; `password` only if nellie generated it. `list`: an array of `{"project", "owner", "owner_powers", "users": [{"name", "type", "powers", "belongs_to", "can_connect", "expired"}]}`, where `type` is `application`, `admin` or `privileged`, `powers` and `owner_powers` are arrays with one power each (`[]` for none), and `belongs_to` names the database a user's name belongs to when that isn't the project (`""` otherwise). |
 
 Flags can go before or after the user name.
 

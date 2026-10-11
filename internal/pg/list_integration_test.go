@@ -119,8 +119,9 @@ func TestListProjects(t *testing.T) {
 		mustExec(t, admin, stmt)
 	}
 
-	// p_rep is a longer project the admin can't act for. Its reader can also
-	// connect to p, but belongs to p_rep, so it's not a user of p.
+	// p_rep is a longer database the admin can't act for. Its reader can also
+	// connect to p, but belongs to p_rep: it's shown under p, the longest
+	// project its name matches, noted as belonging to p_rep, not as p's user.
 	rep, repOwner, repReader := p.Name+"_rep", p.Name+"_rep_owner", p.Name+"_rep_ro"
 	*dropUsers = append(*dropUsers, repReader, repOwner)
 	mustExec(t, admin, "CREATE ROLE "+ident(repOwner)+" NOLOGIN")
@@ -299,6 +300,11 @@ func TestListProjects(t *testing.T) {
 			{Name: fullApp, Kind: AppUser},
 		}},
 	}
+	if !super {
+		pw := want[p.Name]
+		pw.Users = append(pw.Users, UserInfo{Name: repReader, Kind: AppUser, BelongsTo: rep, CanConnect: true})
+		want[p.Name] = pw
+	}
 	for name, w := range want {
 		g, ok := got[name]
 		if !ok {
@@ -441,7 +447,8 @@ func TestListProjectsFlagsPrivilegedRoles(t *testing.T) {
 	rep, repm, rlsm := p.Name+"_rep", p.Name+"_repm", p.Name+"_rlsm"
 	repGroup, rlsGroup := p.Name+"_repgroup", p.Name+"_rlsgroup"
 	*dropUsers = append(*dropUsers, su, mon, rep, repm, rlsm, repGroup, rlsGroup)
-	mustExec(t, admin, "CREATE ROLE "+ident(su)+" LOGIN SUPERUSER")
+	// A connection limit of 0 doesn't stop a superuser, so it can still connect.
+	mustExec(t, admin, "CREATE ROLE "+ident(su)+" LOGIN SUPERUSER CONNECTION LIMIT 0")
 	mustExec(t, admin, "CREATE ROLE "+ident(mon)+" LOGIN")
 	mustExec(t, admin, "GRANT pg_monitor TO "+ident(mon))
 	mustExec(t, admin, "GRANT CONNECT ON DATABASE "+ident(p.Name)+" TO "+ident(mon))
@@ -462,6 +469,9 @@ func TestListProjectsFlagsPrivilegedRoles(t *testing.T) {
 	powers := map[string]string{}
 	for _, u := range projects[i].Users {
 		powers[u.Name] = strings.Join(u.Powers, ", ")
+		if u.Name == su && !u.CanConnect {
+			t.Errorf("superuser %s can't connect, but connection limits don't apply to superusers", su)
+		}
 	}
 	for name, want := range map[string]string{
 		su:   "SUPERUSER",
@@ -544,7 +554,7 @@ func TestPinSessionAllowsAdminsOwnRole(t *testing.T) {
 	}
 }
 
-// Value: protects=a superuser admin doesn't see template0/template1 or an invalid database as projects, and an invalid database's users don't fall to a shorter one; fails_when=a datconnlimit or name filter changes; why_new=only a non-superuser admin ran list; seam=none
+// Value: protects=a superuser admin doesn't see template0/template1 or an invalid database as projects, and an invalid database's users show under the shorter project as belonging to it; fails_when=a datconnlimit or name filter changes; why_new=only a non-superuser admin ran list; seam=none
 func TestListProjectsLeavesOutSystemAndInvalidDatabases(t *testing.T) {
 	ctx := context.Background()
 	cfg := adminConfig(t)
@@ -586,8 +596,8 @@ func TestListProjectsLeavesOutSystemAndInvalidDatabases(t *testing.T) {
 		case "template0", "template1", gone:
 			t.Errorf("listed %s as a project", pr.Name)
 		case p.Name:
-			if len(pr.Users) != 0 {
-				t.Errorf("project %s: users %+v, want none (%s belongs to %s)", p.Name, pr.Users, goneApp, gone)
+			if want := []UserInfo{{Name: goneApp, Kind: AppUser, BelongsTo: gone}}; !reflect.DeepEqual(pr.Users, want) {
+				t.Errorf("project %s: users %+v, want %+v (shown under p, belonging to %s)", p.Name, pr.Users, want, gone)
 			}
 		}
 	}

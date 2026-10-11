@@ -5,6 +5,7 @@ package pg
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -148,8 +149,8 @@ func TestRotatePasswordReportsExpiry(t *testing.T) {
 	}
 }
 
-// Value: protects=the URL names the database the user can connect to when project names share a prefix; fails_when=projectDatabase picks the longest existing name without checking CONNECT; why_new=pass-2 red team: shop_v2_app of project shop was sent to project shop_v2; seam=none
-func TestRotatePasswordPicksConnectableProject(t *testing.T) {
+// Value: protects=the URL's database is picked by name, as list does, and only given for an admin's project the role can connect to; fails_when=projectDatabase picks by CONNECT again or drops a check; why_new=red team: CREATEDB redirect; seam=none
+func TestRotatePasswordPicksProjectByName(t *testing.T) {
 	ctx := context.Background()
 	cfg := adminConfig(t)
 	p, _, dropUsers := newTestProject(t, cfg)
@@ -167,8 +168,81 @@ func TestRotatePasswordPicksConnectableProject(t *testing.T) {
 			t.Errorf("dropping %s: %v", other.Name, err)
 		}
 	})
-	// ...and a user of p whose suffix starts with "v2_".
-	u, err := NewUser(AppUser, p.Name+"_v2_app", p.Name)
+	addUser := func(name string) User {
+		t.Helper()
+		u, err := NewUser(AppUser, name, p.Name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		*dropUsers = append(*dropUsers, u.Name)
+		if err := AddUser(ctx, cfg, u, NewPassword()); err != nil {
+			t.Fatal(err)
+		}
+		return u
+	}
+	rotate := func(u User) string {
+		t.Helper()
+		rot, err := RotatePassword(ctx, cfg, u.Name, NewPassword())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return rot.Database
+	}
+
+	// ...and a user of p whose suffix starts with "v2_": by name it belongs
+	// to p_v2, which it can't connect to, so there's no URL at all rather
+	// than one for p, or one it can't use.
+	if db := rotate(addUser(p.Name + "_v2_app")); db != "" {
+		t.Errorf("database = %q, want none: the name picks %s, which the user can't connect to", db, other.Name)
+	}
+
+	app := addUser(p.Name + "_app")
+	if db := rotate(app); db != p.Name {
+		t.Fatalf("database = %q, want %s", db, p.Name)
+	}
+
+	// A role the admin can't act for creates a database named like the user,
+	// which PUBLIC can connect to. The new password mustn't come with a URL
+	// for that database.
+	admin, err := pgx.ConnectConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { admin.Close(context.Background()) })
+	var super bool
+	if err := admin.QueryRow(ctx, "SELECT rolsuper FROM pg_roles WHERE rolname = current_user").Scan(&super); err != nil {
+		t.Fatal(err)
+	}
+	if super {
+		return // a superuser admin can act for every database, the stranger's too
+	}
+	stranger := p.Name + "_stranger"
+	*dropUsers = append(*dropUsers, stranger)
+	mustExec(t, admin, "CREATE ROLE "+ident(stranger)+" NOLOGIN")
+	mustExec(t, admin, "GRANT "+ident(stranger)+" TO "+ident(cfg.User))
+	mustExec(t, admin, "CREATE DATABASE "+ident(app.Name)+" OWNER "+ident(stranger))
+	mustExec(t, admin, "REVOKE "+ident(stranger)+" FROM "+ident(cfg.User))
+	t.Cleanup(func() {
+		for _, stmt := range []string{
+			"GRANT " + ident(stranger) + " TO " + ident(cfg.User),
+			"DROP DATABASE IF EXISTS " + ident(app.Name),
+		} {
+			if _, err := admin.Exec(context.Background(), stmt); err != nil {
+				t.Errorf("%s: %v", stmt, err)
+			}
+		}
+	})
+	if db := rotate(app); db != "" {
+		t.Errorf("database = %q, want none: %s belongs to a role the admin can't act for", db, app.Name)
+	}
+}
+
+// Value: protects=rotate-password reports powers the new password carries beyond the project, as list shows them; fails_when=rolePowers stops being called or loses a power; why_new=red team: list and rotate disagreed; seam=none
+func TestRotatePasswordReportsPowers(t *testing.T) {
+	ctx := context.Background()
+	cfg := adminConfig(t)
+	p, _, dropUsers := newTestProject(t, cfg)
+	u, err := NewUser(AppUser, p.Name+"_app", p.Name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,13 +250,26 @@ func TestRotatePasswordPicksConnectableProject(t *testing.T) {
 	if err := AddUser(ctx, cfg, u, NewPassword()); err != nil {
 		t.Fatal(err)
 	}
-
 	rot, err := RotatePassword(ctx, cfg, u.Name, NewPassword())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rot.Database != p.Name {
-		t.Errorf("database = %q, want %q: the user can't connect to %s", rot.Database, p.Name, other.Name)
+	if rot.Powers != nil {
+		t.Errorf("powers of a plain app user = %q, want none", rot.Powers)
+	}
+
+	admin, err := pgx.ConnectConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { admin.Close(context.Background()) })
+	mustExec(t, admin, "ALTER ROLE "+ident(u.Name)+" CREATEDB")
+	rot, err = RotatePassword(ctx, cfg, u.Name, NewPassword())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(rot.Powers, []string{"CREATEDB"}) {
+		t.Errorf("powers = %q, want CREATEDB", rot.Powers)
 	}
 }
 

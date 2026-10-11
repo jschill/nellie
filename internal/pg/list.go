@@ -20,56 +20,100 @@ import (
 // interrupted DROP DATABASE) and, by name, Postgres's own template0 and
 // template1, which a superuser admin would otherwise see as projects.
 //
-// users: login roles named <db>_<something>, or exactly <db>. Names alone
-// decide where a role goes: the longest matching database, among all of
-// them (DISTINCT ON keeps the first row per role; the ORDER BY puts the
-// longest name first; invalid databases count too, so their roles don't
-// fall through either). Access must not decide it, because a database's owner
-// controls who may connect to it, and could pull a role into its database or
-// push one out. Creating a database to match a name needs CREATEDB. Whether
-// the role can connect is reported instead (can_connect). A role whose
-// database isn't one of the projects isn't listed at all, so it can't fall
-// through to a shorter project. The owner is shown as the owner, so the JOIN
-// drops it, by OID, from the users. The admin role itself is no project's user.
+// homes: each login role named <db>_<something>, or exactly <db>, and its
+// home database: the longest one its name matches, among all of them,
+// invalid ones included (DISTINCT ON keeps the first row per role; the ORDER
+// BY puts the longest name first). Names alone decide this. Access must not,
+// because a database's owner controls who may connect to it, and could pull
+// a role into its database or push one out.
+//
+// users: where each role is shown. That's its home when the home is a
+// project. Otherwise, so no role silently disappears (a CREATEDB role can
+// create a database named like a user), it's the longest project its name
+// matches, with belongs_to naming the home. A role whose name matches no
+// project isn't listed. A home's owner is that database's owner, not a user,
+// and the admin role itself is no project's user, so both are left out.
 //
 // Any member of the owner is an admin user (see User.Plan), here 'MEMBER' on
 // purpose, erring towards admin: a NOINHERIT member doesn't use the owner's
 // privileges directly but can SET ROLE to the owner, and the rare Postgres 16+
 // grant with neither INHERIT nor SET still ties the role to the owner.
 //
-// powers lists what makes a user, or a project's owner, privileged: what
-// rotate-password refuses (SUPERUSER, CREATEROLE, REPLICATION, BYPASSRLS,
-// membership in a role that has them or in a predefined pg_* role except
-// pg_database_owner), plus CREATEDB, which could create a database matching
-// a user's name and so move it, and owning another database, or membership
-// in a role that owns one, which gives that project too. "Another" compares
-// databases, not owners: the project's own owner may own a second database
-// as well. Each power is its own array element, so a name containing ", "
-// can't pass for another power. powers is computed once for every user and
-// owner (subjects), then joined to both.
-//
 // can_connect needs the database to allow connections (datallowconn), and,
 // except for superusers, neither the database's nor the role's connection
 // limit to be 0, as well as CONNECT: the privilege alone ignores all three.
 //
-// The LEFT JOINs keep projects without users, as a row with empty user columns.
+// powers (see powersExpr) is computed once for every listed user and owner,
+// then joined to both. The LEFT JOINs keep projects without users, as a row
+// with empty user columns.
 const ListSQL = `WITH projects AS (
-	SELECT oid, datname, datdba FROM pg_database
+	SELECT oid, datname, datdba, datallowconn, datconnlimit FROM pg_database
 	WHERE datconnlimit <> -2 AND datname NOT IN ('template0', 'template1')
 		AND pg_has_role(datdba, 'USAGE')
-), users AS (
-	SELECT DISTINCT ON (r.rolname) d.oid AS project, r.oid AS role, r.rolname,
-		pg_has_role(r.oid, d.datdba, 'MEMBER') AS admin,
-		d.datallowconn AND (r.rolsuper OR (d.datconnlimit <> 0 AND r.rolconnlimit <> 0))
-			AND has_database_privilege(r.oid, d.oid, 'CONNECT') AS can_connect,
-		coalesce(r.rolvaliduntil < now(), false) AS expired
+), homes AS (
+	SELECT DISTINCT ON (r.rolname) r.oid AS role, r.rolname,
+		d.oid AS home, d.datname AS home_name, d.datdba AS home_owner
 	FROM pg_roles r
 	JOIN pg_database d ON r.rolname = d.datname OR starts_with(r.rolname, d.datname || '_')
 	WHERE r.rolcanlogin AND r.rolname NOT IN (current_user, session_user)
 	ORDER BY r.rolname, length(d.datname) DESC
-), powers AS (
-	SELECT s.project, s.role,
-		array_remove(ARRAY[
+), users AS (
+	SELECT p.oid AS project, h.role, h.rolname,
+		CASE WHEN p.oid = h.home THEN '' ELSE h.home_name END AS belongs_to
+	FROM homes h
+	CROSS JOIN LATERAL (
+		SELECT oid, datdba FROM projects p
+		WHERE h.rolname = p.datname OR starts_with(h.rolname, p.datname || '_')
+		ORDER BY length(p.datname) DESC LIMIT 1
+	) p
+	WHERE h.role <> h.home_owner AND h.role <> p.datdba
+), ` + poweredCTE + `, powers AS (
+	SELECT s.project, s.role, ` + powersExpr + ` AS list
+	FROM (SELECT project, role FROM users UNION SELECT oid, datdba FROM projects) s
+	JOIN pg_roles r ON r.oid = s.role
+)
+SELECT p.datname, pg_get_userbyid(p.datdba), coalesce(op.list, '{}'),
+	coalesce(u.rolname, ''), coalesce(u.belongs_to, ''),
+	coalesce(pg_has_role(r.oid, p.datdba, 'MEMBER'), false),
+	coalesce(p.datallowconn AND (r.rolsuper OR (p.datconnlimit <> 0 AND r.rolconnlimit <> 0))
+		AND has_database_privilege(r.oid, p.oid, 'CONNECT'), false),
+	coalesce(up.list, '{}'), coalesce(r.rolvaliduntil < now(), false)
+FROM projects p
+LEFT JOIN powers op ON op.project = p.oid AND op.role = p.datdba
+LEFT JOIN users u ON u.project = p.oid
+LEFT JOIN pg_roles r ON r.oid = u.role
+LEFT JOIN powers up ON up.project = u.project AND up.role = u.role
+ORDER BY p.datname, u.rolname`
+
+// poweredCTE and powersExpr compute what makes a role privileged beyond its
+// project, for ListSQL and rotate-password's warning, so the two can't drift
+// apart. powersExpr needs the role's pg_roles row as r and its project's
+// database OID as s.project (0 for none), with poweredCTE in the WITH.
+//
+// A power is what rotate-password refuses (SUPERUSER, CREATEROLE,
+// REPLICATION, BYPASSRLS, membership in a role that has them or in a
+// predefined pg_* role except pg_database_owner), plus CREATEDB, which could
+// create a database matching a user's name, and owning another database, or
+// membership in a role that owns one, which gives that project too. "Another"
+// compares databases, not owners: the project's own owner may own a second
+// database as well. Each power is its own array element, so a name containing
+// ", " can't pass for another power. Superusers and CREATEROLE roles skip the
+// memberships: a superuser is a member of every role, and a CREATEROLE role
+// of every role it created, which would bury their real powers.
+//
+// powered narrows the roles whose membership can count to those with a power
+// or owning a database, so pg_has_role runs against those only: against every
+// role it took seconds on a cluster with many roles.
+const poweredCTE = `powered AS MATERIALIZED (
+	SELECT oid, rolname,
+		rolsuper OR rolcreaterole OR rolcreatedb OR rolreplication OR rolbypassrls
+			OR (starts_with(rolname, 'pg_') AND rolname <> 'pg_database_owner') AS always
+	FROM pg_roles
+	WHERE rolsuper OR rolcreaterole OR rolcreatedb OR rolreplication OR rolbypassrls
+		OR starts_with(rolname, 'pg_') OR oid IN (SELECT datdba FROM pg_database)
+)`
+
+const powersExpr = `array_remove(ARRAY[
 			CASE WHEN r.rolsuper THEN 'SUPERUSER' END,
 			CASE WHEN r.rolcreaterole THEN 'CREATEROLE' END,
 			CASE WHEN r.rolcreatedb THEN 'CREATEDB' END,
@@ -77,24 +121,12 @@ const ListSQL = `WITH projects AS (
 			CASE WHEN r.rolbypassrls THEN 'BYPASSRLS' END], NULL)
 		|| ARRAY(SELECT 'owner of ' || o.datname FROM pg_database o
 			WHERE o.datdba = r.oid AND o.oid <> s.project ORDER BY o.datname)
-		|| ARRAY(SELECT 'member of ' || g.rolname FROM pg_roles g
-			WHERE NOT r.rolsuper -- a superuser is a member of every role
-				AND g.oid <> r.oid AND pg_has_role(r.oid, g.oid, 'MEMBER')
-				AND (g.rolsuper OR g.rolcreaterole OR g.rolcreatedb OR g.rolreplication OR g.rolbypassrls
-					OR (starts_with(g.rolname, 'pg_') AND g.rolname <> 'pg_database_owner')
-					OR g.oid IN (SELECT datdba FROM pg_database WHERE oid <> s.project))
-			ORDER BY g.rolname) AS list
-	FROM (SELECT project, role FROM users UNION SELECT oid, datdba FROM projects) s
-	JOIN pg_roles r ON r.oid = s.role
-)
-SELECT p.datname, pg_get_userbyid(p.datdba), coalesce(op.list, '{}'),
-	coalesce(u.rolname, ''), coalesce(u.admin, false), coalesce(u.can_connect, false),
-	coalesce(up.list, '{}'), coalesce(u.expired, false)
-FROM projects p
-LEFT JOIN powers op ON op.project = p.oid AND op.role = p.datdba
-LEFT JOIN users u ON u.project = p.oid AND u.role <> p.datdba
-LEFT JOIN powers up ON up.project = u.project AND up.role = u.role
-ORDER BY p.datname, u.rolname`
+		|| ARRAY(SELECT 'member of ' || g.rolname FROM powered g
+			WHERE NOT r.rolsuper AND NOT r.rolcreaterole
+				AND g.oid <> r.oid
+				AND (g.always OR g.oid IN (SELECT datdba FROM pg_database WHERE oid <> s.project))
+				AND pg_has_role(r.oid, g.oid, 'MEMBER')
+			ORDER BY g.rolname)`
 
 // ListScript is what ListProjects runs, as a psql script for --dry-run.
 func ListScript() string {
@@ -118,6 +150,11 @@ type UserInfo struct {
 	// Powers is what makes the user privileged, one per element, such as
 	// "CREATEROLE" or "member of pg_monitor"; nil for none.
 	Powers []string
+	// BelongsTo names the database the user's name belongs to when that isn't
+	// this project: one the admin can't act for, or an invalid one. It's
+	// shown under this project, the longest one its name matches, so it
+	// doesn't silently disappear. "" for a user of this project.
+	BelongsTo string
 	// CanConnect is whether the role may connect to the project's database.
 	// A role that can't is still listed: who may connect is up to the owner.
 	CanConnect bool
@@ -150,10 +187,10 @@ func ListProjects(ctx context.Context, cfg *pgx.ConnConfig) ([]ProjectInfo, erro
 
 	var projects []ProjectInfo
 	for rows.Next() {
-		var db, owner, user string
+		var db, owner, user, belongsTo string
 		var ownerPowers, powers []string
 		var admin, canConnect, expired bool
-		if err := rows.Scan(&db, &owner, &ownerPowers, &user, &admin, &canConnect, &powers, &expired); err != nil {
+		if err := rows.Scan(&db, &owner, &ownerPowers, &user, &belongsTo, &admin, &canConnect, &powers, &expired); err != nil {
 			return nil, fmt.Errorf("listing projects: %w", err)
 		}
 		// Rows come sorted by project, so a new name starts a new project.
@@ -168,7 +205,7 @@ func ListProjects(ctx context.Context, cfg *pgx.ConnConfig) ([]ProjectInfo, erro
 			kind = AdminUser
 		}
 		p := &projects[len(projects)-1]
-		p.Users = append(p.Users, UserInfo{Name: user, Kind: kind, Powers: noneIfEmpty(powers), CanConnect: canConnect, Expired: expired})
+		p.Users = append(p.Users, UserInfo{Name: user, Kind: kind, Powers: noneIfEmpty(powers), BelongsTo: belongsTo, CanConnect: canConnect, Expired: expired})
 	}
 	// rows.Next returns false on errors too, not only at the end.
 	if err := rows.Err(); err != nil {

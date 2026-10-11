@@ -21,7 +21,9 @@ const listHelp = `Lists the projects the admin role can act for: the databases i
 whose owner's privileges it has through membership. Under each project come
 its users, the login roles named <project>_<something> (or exactly <project>,
 when that role isn't the owner); a role goes under the longest database its
-name matches, and a note says when it can't connect:
+name matches, and a note says when it can't connect. A role whose database
+the admin can't act for is shown under the longest project its name matches,
+noted "belongs to database ...", so it can't silently disappear:
 
   application  any other user, such as one made by "nellie add-user"
                as an application user, which reads and writes rows
@@ -50,6 +52,7 @@ type listUser struct {
 	Name       string   `json:"name"`
 	Type       string   `json:"type"`        // "application", "admin" or "privileged"
 	Powers     []string `json:"powers"`      // why it's privileged, one per element; [] if it isn't
+	BelongsTo  string   `json:"belongs_to"`  // the database its name belongs to, if not this project; "" otherwise
 	CanConnect bool     `json:"can_connect"` // may connect to the project's database
 	Expired    bool     `json:"expired"`     // VALID UNTIL has passed: the password no longer works
 }
@@ -104,7 +107,7 @@ func listJSON(projects []pg.ProjectInfo) []listProject {
 	for _, p := range projects {
 		lp := listProject{Project: p.Name, Owner: p.Owner, OwnerPowers: nonNil(p.OwnerPowers), Users: make([]listUser, 0, len(p.Users))}
 		for _, u := range p.Users {
-			lp.Users = append(lp.Users, listUser{Name: u.Name, Type: userType(u), Powers: nonNil(u.Powers), CanConnect: u.CanConnect, Expired: u.Expired})
+			lp.Users = append(lp.Users, listUser{Name: u.Name, Type: userType(u), Powers: nonNil(u.Powers), BelongsTo: u.BelongsTo, CanConnect: u.CanConnect, Expired: u.Expired})
 		}
 		res = append(res, lp)
 	}
@@ -165,6 +168,9 @@ func printList(w io.Writer, projects []pg.ProjectInfo) {
 		for _, u := range p.Users {
 			fmt.Fprintf(tw, "  %s\t%s", printable(u.Name), userType(u))
 			var notes []string
+			if u.BelongsTo != "" {
+				notes = append(notes, "belongs to database "+printable(u.BelongsTo))
+			}
 			if len(u.Powers) > 0 {
 				notes = append(notes, powersNote(u.Powers))
 			}

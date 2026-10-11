@@ -52,6 +52,7 @@ func TestPrintList(t *testing.T) {
 			{Name: "shop_admin", Kind: pg.AdminUser, CanConnect: true},
 			{Name: "shop_boss", Kind: pg.AdminUser, Powers: []string{"CREATEROLE", "member of pg_monitor"}, Expired: true},
 			{Name: "shop_\x1b[2J", Kind: pg.AppUser, CanConnect: true},
+			{Name: "shop_v2_app", Kind: pg.AppUser, BelongsTo: "shop_v2"},
 		}},
 	})
 	want := `blog  (owner blog)
@@ -62,6 +63,7 @@ shop  (owner alice, privileged: CREATEDB, owner of blog)
   shop_admin      admin
   shop_boss       privileged   CREATEROLE, member of pg_monitor; can't connect; password expired (VALID UNTIL)
   "shop_\x1b[2J"  application
+  shop_v2_app     application  belongs to database shop_v2; can't connect
 `
 	if out.String() != want {
 		t.Errorf("got:\n%s\nwant:\n%s", out.String(), want)
@@ -86,11 +88,11 @@ func TestListJSON(t *testing.T) {
 		{"users", []pg.ProjectInfo{{Name: "shop", Owner: "shop", Users: []pg.UserInfo{
 			{Name: "shop_admin", Kind: pg.AdminUser},
 			{Name: "shop_app", Kind: pg.AppUser, CanConnect: true, Expired: true},
-			{Name: "shop_boss", Kind: pg.AdminUser, Powers: []string{"CREATEROLE", "member of x, y"}},
+			{Name: "shop_boss", Kind: pg.AdminUser, Powers: []string{"CREATEROLE", "member of x, y"}, BelongsTo: "shop_boss"},
 		}}}, `[{"project":"shop","owner":"shop","owner_powers":[],"users":[` +
-			`{"name":"shop_admin","type":"admin","powers":[],"can_connect":false,"expired":false},` +
-			`{"name":"shop_app","type":"application","powers":[],"can_connect":true,"expired":true},` +
-			`{"name":"shop_boss","type":"privileged","powers":["CREATEROLE","member of x, y"],"can_connect":false,"expired":false}]}]`},
+			`{"name":"shop_admin","type":"admin","powers":[],"belongs_to":"","can_connect":false,"expired":false},` +
+			`{"name":"shop_app","type":"application","powers":[],"belongs_to":"","can_connect":true,"expired":true},` +
+			`{"name":"shop_boss","type":"privileged","powers":["CREATEROLE","member of x, y"],"belongs_to":"shop_boss","can_connect":false,"expired":false}]}]`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -105,11 +107,12 @@ func TestListJSON(t *testing.T) {
 	}
 }
 
-// Value: protects=no project, owner or user name reaches the terminal with raw control or bidi characters, whichever column it is in; fails_when=printable() is dropped from the project or owner column; why_new=TestPrintList only puts the escape in a user name; seam=none
+// Value: protects=no project, owner or user name reaches the terminal with raw control or bidi characters, whichever column it is in; fails_when=printable() is dropped from a column or from powersNote; why_new=TestPrintList only puts the escape in a user name; seam=none
 func TestPrintListEscapesEveryName(t *testing.T) {
 	// ESC (clears the screen), a newline (forges a line) and U+202E (reverses text).
 	hostile := "x\x1b[2J\n" + string(rune(0x202e))
-	quoted := `"x\x1b[2J\n\` + `u202e"`
+	// The escaped form, whether the name is quoted alone or inside a power.
+	escaped := `x\x1b[2J\n\` + `u202e`
 	tests := []struct {
 		name    string
 		project pg.ProjectInfo
@@ -117,6 +120,8 @@ func TestPrintListEscapesEveryName(t *testing.T) {
 		{"project", pg.ProjectInfo{Name: hostile, Owner: "o"}},
 		{"owner", pg.ProjectInfo{Name: "p", Owner: hostile}},
 		{"user", pg.ProjectInfo{Name: "p", Owner: "o", Users: []pg.UserInfo{{Name: hostile}}}},
+		{"user powers", pg.ProjectInfo{Name: "p", Owner: "o", Users: []pg.UserInfo{{Name: "p_u", Powers: []string{"owner of " + hostile}}}}},
+		{"owner powers", pg.ProjectInfo{Name: "p", Owner: "o", OwnerPowers: []string{"member of " + hostile}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -126,8 +131,8 @@ func TestPrintListEscapesEveryName(t *testing.T) {
 			if strings.ContainsAny(got, "\x1b"+string(rune(0x202e))) || strings.Contains(got, "x\n") {
 				t.Errorf("raw control characters in the output: %q", got)
 			}
-			if !strings.Contains(got, quoted) {
-				t.Errorf("output lacks the escaped name %s: %q", quoted, got)
+			if !strings.Contains(got, escaped) {
+				t.Errorf("output lacks the escaped name %s: %q", escaped, got)
 			}
 		})
 	}

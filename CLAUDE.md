@@ -69,8 +69,11 @@ are superusers, are the admin itself, have `CREATEROLE`, `REPLICATION` or
 `BYPASSRLS`, or are members of a role that has, or of any predefined `pg_*`
 role except `pg_database_owner` (`list` shows those as `privileged`); it warns when the role's `VALID UNTIL` has passed. Piped input must
 be a single line. The URL's database is the longest prefix
-of the role name (cut at `_`, or the whole name) that is an existing database
-the role can connect to; none found means no URL.
+of the role name (cut at `_`, or the whole name) that is an existing
+database, by name alone like `list`; there's a URL only if that database is
+one of the admin's projects and the role can connect to it (never a shorter
+one: picking by CONNECT let a CREATEDB role redirect the URL). It warns, like
+`list`, when the role has powers beyond its project (`rolePowers`).
 
 `list` shows the databases whose owner's privileges the admin has
 (`pg_has_role(datdba, 'USAGE')`, as in `add-user`; not `'MEMBER'`, which on
@@ -83,8 +86,9 @@ Never assign by CONNECT or membership: some database owner controls those,
 and every such rule let an owner hide or move roles (three review passes, see
 JSC-3). A role that can't connect (`datallowconn`, connection limits of 0
 on the database or role unless superuser, and CONNECT) gets a
-`can_connect: false` note; a role whose database isn't visible, or is
-invalid, isn't listed. The owner (by OID) and the admin
+`can_connect: false` note. A role whose home database (by name) isn't a
+project, being invisible or invalid, is shown under the longest project its
+name matches with `belongs_to` naming the home, so it can't vanish. The owner (by OID) and the admin
 itself are never users. Types: `admin` is `'MEMBER'` of the owner, on purpose
 (a NOINHERIT member can still `SET ROLE` to it); `privileged` has what
 `rotate-password` refuses, `CREATEDB` (it could create a database that
@@ -92,7 +96,9 @@ matches a user's name), or owns another database (directly or through
 membership; compare database OIDs, not owner OIDs), listed in `powers`, one
 power per array element so a name containing ", " can't fake one; the rest
 are `application`. The owner's powers are computed the same way
-(`owner_powers`). On Postgres 15 an owner can revoke the admin's membership
+(`owner_powers`), by one shared SQL fragment (`powersExpr`, also used by
+`rotate-password`); superusers and `CREATEROLE` roles skip the memberships,
+which would list every role they manage. On Postgres 15 an owner can revoke the admin's membership
 and so drop out of `list`; that's documented, not handled. It runs `pg.ListSQL` (one query, no
 bind parameters) after `pinSession` and the version check; `--dry-run` prints
 the pin and the query (`pg.ListScript`).

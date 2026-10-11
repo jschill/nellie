@@ -103,6 +103,11 @@ func TestListCommand(t *testing.T) {
 			if !slices.Contains(g.OwnerPowers, "CREATEDB") {
 				t.Errorf("owner powers of %s = %q, want CREATEDB among them", w.Project, g.OwnerPowers)
 			}
+			// The admin has CREATEROLE, so its memberships (one per role it
+			// created) aren't listed: they'd bury its real powers.
+			if slices.ContainsFunc(g.OwnerPowers, func(p string) bool { return strings.HasPrefix(p, "member of ") }) {
+				t.Errorf("owner powers of %s = %q, want no memberships for a CREATEROLE owner", w.Project, g.OwnerPowers)
+			}
 			g.OwnerPowers = nil
 			if !reflect.DeepEqual(g, w) {
 				t.Errorf("got  %+v\nwant %+v", g, w)
