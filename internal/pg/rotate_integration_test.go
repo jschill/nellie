@@ -49,8 +49,10 @@ func TestRotatePassword(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if rot.Database != p.Name || rot.Expired {
-				t.Errorf("got %+v, want database %q and not expired", rot, p.Name)
+			// Its own project is no power: an owner owns p, an admin user is a
+			// member of p's owner.
+			if rot.Database != p.Name || rot.Expired || rot.Powers != nil || rot.Template {
+				t.Errorf("got %+v, want database %q, not expired, no powers", rot, p.Name)
 			}
 			connectAs(t, cfg, tt.role, newPassword, p.Name)
 
@@ -149,11 +151,16 @@ func TestRotatePasswordReportsExpiry(t *testing.T) {
 	}
 }
 
-// Value: protects=the URL's database is picked by name, as list does, and only given for an admin's project the role can connect to; fails_when=projectDatabase picks by CONNECT again or drops a check; why_new=red team: CREATEDB redirect; seam=none
+// Value: protects=the URL names only the role's home by name, an admin's project owned by the role named after it, that the role can connect to; fails_when=projectHome drops one of those checks; why_new=red team: redirects; seam=none
 func TestRotatePasswordPicksProjectByName(t *testing.T) {
 	ctx := context.Background()
 	cfg := adminConfig(t)
 	p, _, dropUsers := newTestProject(t, cfg)
+	admin, err := pgx.ConnectConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { admin.Close(context.Background()) })
 
 	// A second project whose name is p's name plus "_v2"...
 	other, err := NewProject(p.Name + "_v2")
@@ -168,72 +175,107 @@ func TestRotatePasswordPicksProjectByName(t *testing.T) {
 			t.Errorf("dropping %s: %v", other.Name, err)
 		}
 	})
-	addUser := func(name string) User {
+	rotate := func(user string) string {
 		t.Helper()
-		u, err := NewUser(AppUser, name, p.Name)
-		if err != nil {
-			t.Fatal(err)
-		}
-		*dropUsers = append(*dropUsers, u.Name)
-		if err := AddUser(ctx, cfg, u, NewPassword()); err != nil {
-			t.Fatal(err)
-		}
-		return u
-	}
-	rotate := func(u User) string {
-		t.Helper()
-		rot, err := RotatePassword(ctx, cfg, u.Name, NewPassword())
+		rot, err := RotatePassword(ctx, cfg, user, NewPassword())
 		if err != nil {
 			t.Fatal(err)
 		}
 		return rot.Database
 	}
 
-	// ...and a user of p whose suffix starts with "v2_": by name it belongs
-	// to p_v2, which it can't connect to, so there's no URL at all rather
-	// than one for p, or one it can't use.
-	if db := rotate(addUser(p.Name + "_v2_app")); db != "" {
+	// ...and a user of p whose suffix starts with "v2_", from before nellie
+	// refused such names (AddUser would now). By name it belongs to p_v2,
+	// which it can't connect to: no URL rather than one for p. Granting it
+	// CONNECT on p_v2 is what p_v2's owner could do; the URL then names p_v2,
+	// the user's home, never p.
+	ambiguous := p.Name + "_v2_app"
+	*dropUsers = append(*dropUsers, ambiguous)
+	mustExec(t, admin, "CREATE ROLE "+ident(ambiguous)+" LOGIN")
+	mustExec(t, admin, "GRANT CONNECT ON DATABASE "+ident(p.Name)+" TO "+ident(ambiguous))
+	if db := rotate(ambiguous); db != "" {
 		t.Errorf("database = %q, want none: the name picks %s, which the user can't connect to", db, other.Name)
 	}
 
-	app := addUser(p.Name + "_app")
-	if db := rotate(app); db != p.Name {
+	u, err := NewUser(AppUser, p.Name+"_app", p.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	*dropUsers = append(*dropUsers, u.Name)
+	if err := AddUser(ctx, cfg, u, NewPassword()); err != nil {
+		t.Fatal(err)
+	}
+	if db := rotate(u.Name); db != p.Name {
 		t.Fatalf("database = %q, want %s", db, p.Name)
 	}
 
-	// A role the admin can't act for creates a database named like the user,
-	// which PUBLIC can connect to. The new password mustn't come with a URL
-	// for that database.
+	// p closed to connections: no URL, it couldn't be used.
+	mustExec(t, admin, "ALTER DATABASE "+ident(p.Name)+" ALLOW_CONNECTIONS false")
+	if db := rotate(u.Name); db != "" {
+		t.Errorf("database = %q, want none: %s allows no connections", db, p.Name)
+	}
+	mustExec(t, admin, "ALTER DATABASE "+ident(p.Name)+" ALLOW_CONNECTIONS true")
+
+	// A database named like the user, which PUBLIC can connect to, created by
+	// a role with CREATEDB: here p's owner, which the admin acts for. The
+	// name now picks it, but its owner isn't named after it, so no URL.
+	mustExec(t, admin, "CREATE DATABASE "+ident(u.Name)+" OWNER "+ident(p.Name))
+	t.Cleanup(func() {
+		if _, err := admin.Exec(context.Background(), "DROP DATABASE IF EXISTS "+ident(u.Name)); err != nil {
+			t.Errorf("dropping %s: %v", u.Name, err)
+		}
+	})
+	if db := rotate(u.Name); db != "" {
+		t.Errorf("database = %q, want none: %s isn't owned by a role named after it", db, u.Name)
+	}
+}
+
+// Value: protects=add-project and add-user refuse names that would make the name-to-project mapping ambiguous; fails_when=either check is dropped; why_new=JSC-3; seam=none
+func TestNamesMustBeUnambiguous(t *testing.T) {
+	ctx := context.Background()
+	cfg := adminConfig(t)
+	p, _, dropUsers := newTestProject(t, cfg)
+
+	app, err := NewUser(AppUser, p.Name+"_v2_app", p.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	*dropUsers = append(*dropUsers, app.Name)
+	if err := AddUser(ctx, cfg, app, NewPassword()); err != nil {
+		t.Fatal(err)
+	}
+	// A project p_v2 would claim p's user p_v2_app.
+	v2, err := NewProject(p.Name + "_v2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := CreateProject(ctx, cfg, v2, NewPassword()); !errors.Is(err, ErrAmbiguous) || !strings.Contains(err.Error(), "role "+app.Name) {
+		t.Errorf("CreateProject(%s) = %v, want ErrAmbiguous naming role %s", v2.Name, err, app.Name)
+		if err == nil {
+			dropProject(context.Background(), cfg, v2, true)
+		}
+	}
+
+	// The other order: with a database p_x, a user p_x_app of p would belong to it.
 	admin, err := pgx.ConnectConfig(ctx, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { admin.Close(context.Background()) })
-	var super bool
-	if err := admin.QueryRow(ctx, "SELECT rolsuper FROM pg_roles WHERE rolname = current_user").Scan(&super); err != nil {
-		t.Fatal(err)
-	}
-	if super {
-		return // a superuser admin can act for every database, the stranger's too
-	}
-	stranger := p.Name + "_stranger"
-	*dropUsers = append(*dropUsers, stranger)
-	mustExec(t, admin, "CREATE ROLE "+ident(stranger)+" NOLOGIN")
-	mustExec(t, admin, "GRANT "+ident(stranger)+" TO "+ident(cfg.User))
-	mustExec(t, admin, "CREATE DATABASE "+ident(app.Name)+" OWNER "+ident(stranger))
-	mustExec(t, admin, "REVOKE "+ident(stranger)+" FROM "+ident(cfg.User))
+	x := p.Name + "_x"
+	mustExec(t, admin, "CREATE DATABASE "+ident(x))
 	t.Cleanup(func() {
-		for _, stmt := range []string{
-			"GRANT " + ident(stranger) + " TO " + ident(cfg.User),
-			"DROP DATABASE IF EXISTS " + ident(app.Name),
-		} {
-			if _, err := admin.Exec(context.Background(), stmt); err != nil {
-				t.Errorf("%s: %v", stmt, err)
-			}
+		if _, err := admin.Exec(context.Background(), "DROP DATABASE IF EXISTS "+ident(x)); err != nil {
+			t.Errorf("dropping %s: %v", x, err)
 		}
 	})
-	if db := rotate(app); db != "" {
-		t.Errorf("database = %q, want none: %s belongs to a role the admin can't act for", db, app.Name)
+	xApp, err := NewUser(AppUser, x+"_app", p.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	*dropUsers = append(*dropUsers, xApp.Name)
+	if err := AddUser(ctx, cfg, xApp, NewPassword()); !errors.Is(err, ErrAmbiguous) || !strings.Contains(err.Error(), "database "+x) {
+		t.Errorf("AddUser(%s) = %v, want ErrAmbiguous naming database %s", xApp.Name, err, x)
 	}
 }
 

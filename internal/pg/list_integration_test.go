@@ -315,6 +315,11 @@ func TestListProjects(t *testing.T) {
 			t.Errorf("project %s:\n got %+v\nwant %+v", name, g, w)
 		}
 	}
+	// x's owner isn't named after x, unlike p's; template is a template.
+	if got[p.Name].ForeignOwner || !got[x].ForeignOwner || !got[template].Template || got[p.Name].Template {
+		t.Errorf("flags: p foreign=%v template=%v, x foreign=%v, template template=%v; want false, false, true, true",
+			got[p.Name].ForeignOwner, got[p.Name].Template, got[x].ForeignOwner, got[template].Template)
+	}
 	// x's owner also owns x2, which the project line shows; p's owner owns
 	// nothing else.
 	if got := got[x].OwnerPowers; !reflect.DeepEqual(got, []string{"owner of " + x2}) {

@@ -123,6 +123,9 @@ func AddUser(ctx context.Context, cfg *pgx.ConnConfig, u User, password string) 
 	if err := checkNamesFree(ctx, admin, nil, []string{u.Name}); err != nil {
 		return err
 	}
+	if err := checkUserNameUnambiguous(ctx, admin, u.Name, u.Project); err != nil {
+		return err
+	}
 	plan := u.Plan(owner, verifier)
 
 	if err := runTx(ctx, admin, plan.Roles); err != nil {

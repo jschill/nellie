@@ -33,7 +33,9 @@ noted "belongs to database ...", so it can't silently disappear:
                CREATEROLE, CREATEDB, REPLICATION, BYPASSRLS, membership in
                a role that has them or in a predefined pg_* role, or owning
                another database (directly or through membership). An owner
-               with such powers is marked on the project line.
+               with such powers is marked on the project line, and so is an
+               owner that isn't named after the database (nellie's projects
+               always are) and a template database.
 
 The admin role itself isn't listed as a user. It only reads, and shows no
 passwords. Also known as "nellie trumpet".
@@ -42,10 +44,12 @@ passwords. Also known as "nellie trumpet".
 // listProject and listUser are the --json output. Like rotateResult, the
 // field names in the tags are a stable interface.
 type listProject struct {
-	Project     string     `json:"project"`
-	Owner       string     `json:"owner"`
-	OwnerPowers []string   `json:"owner_powers"` // the owner's powers beyond the project, [] for none
-	Users       []listUser `json:"users"`
+	Project      string     `json:"project"`
+	Owner        string     `json:"owner"`
+	OwnerPowers  []string   `json:"owner_powers"`  // the owner's powers beyond the project, [] for none
+	Template     bool       `json:"template"`      // any CREATEDB role can copy the database, data included
+	ForeignOwner bool       `json:"foreign_owner"` // the owner isn't the role named after the database
+	Users        []listUser `json:"users"`
 }
 
 type listUser struct {
@@ -105,7 +109,8 @@ func list(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 func listJSON(projects []pg.ProjectInfo) []listProject {
 	res := make([]listProject, 0, len(projects))
 	for _, p := range projects {
-		lp := listProject{Project: p.Name, Owner: p.Owner, OwnerPowers: nonNil(p.OwnerPowers), Users: make([]listUser, 0, len(p.Users))}
+		lp := listProject{Project: p.Name, Owner: p.Owner, OwnerPowers: nonNil(p.OwnerPowers),
+			Template: p.Template, ForeignOwner: p.ForeignOwner, Users: make([]listUser, 0, len(p.Users))}
 		for _, u := range p.Users {
 			lp.Users = append(lp.Users, listUser{Name: u.Name, Type: userType(u), Powers: nonNil(u.Powers), BelongsTo: u.BelongsTo, CanConnect: u.CanConnect, Expired: u.Expired})
 		}
@@ -157,11 +162,17 @@ func printList(w io.Writer, projects []pg.ProjectInfo) {
 		if i > 0 {
 			fmt.Fprintln(tw)
 		}
-		owner := printable(p.Owner)
+		about := []string{"owner " + printable(p.Owner)}
 		if len(p.OwnerPowers) > 0 {
-			owner += ", privileged: " + powersNote(p.OwnerPowers)
+			about = append(about, "privileged: "+powersNote(p.OwnerPowers))
 		}
-		fmt.Fprintf(tw, "%s  (owner %s)\n", printable(p.Name), owner)
+		if p.ForeignOwner {
+			about = append(about, "owner isn't named after the database")
+		}
+		if p.Template {
+			about = append(about, "template: any CREATEDB role can copy it")
+		}
+		fmt.Fprintf(tw, "%s  (%s)\n", printable(p.Name), strings.Join(about, "; "))
 		if len(p.Users) == 0 {
 			fmt.Fprintln(tw, `  no users yet; add one with "nellie add-user"`)
 		}

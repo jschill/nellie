@@ -46,8 +46,8 @@ func TestListUsageErrors(t *testing.T) {
 func TestPrintList(t *testing.T) {
 	var out bytes.Buffer
 	printList(&out, []pg.ProjectInfo{
-		{Name: "blog", Owner: "blog"},
-		{Name: "shop", Owner: "alice", OwnerPowers: []string{"CREATEDB", "owner of blog"}, Users: []pg.UserInfo{
+		{Name: "blog", Owner: "blog", Template: true},
+		{Name: "shop", Owner: "alice", OwnerPowers: []string{"CREATEDB", "owner of blog"}, ForeignOwner: true, Users: []pg.UserInfo{
 			{Name: "shop_app", Kind: pg.AppUser, CanConnect: true, Expired: true},
 			{Name: "shop_admin", Kind: pg.AdminUser, CanConnect: true},
 			{Name: "shop_boss", Kind: pg.AdminUser, Powers: []string{"CREATEROLE", "member of pg_monitor"}, Expired: true},
@@ -55,10 +55,10 @@ func TestPrintList(t *testing.T) {
 			{Name: "shop_v2_app", Kind: pg.AppUser, BelongsTo: "shop_v2"},
 		}},
 	})
-	want := `blog  (owner blog)
+	want := `blog  (owner blog; template: any CREATEDB role can copy it)
   no users yet; add one with "nellie add-user"
 
-shop  (owner alice, privileged: CREATEDB, owner of blog)
+shop  (owner alice; privileged: CREATEDB, owner of blog; owner isn't named after the database)
   shop_app        application  password expired (VALID UNTIL)
   shop_admin      admin
   shop_boss       privileged   CREATEROLE, member of pg_monitor; can't connect; password expired (VALID UNTIL)
@@ -84,12 +84,12 @@ func TestListJSON(t *testing.T) {
 		want     string
 	}{
 		{"no projects", nil, `[]`},
-		{"no users", []pg.ProjectInfo{{Name: "blog", Owner: "blog"}}, `[{"project":"blog","owner":"blog","owner_powers":[],"users":[]}]`},
+		{"no users", []pg.ProjectInfo{{Name: "blog", Owner: "blog"}}, `[{"project":"blog","owner":"blog","owner_powers":[],"template":false,"foreign_owner":false,"users":[]}]`},
 		{"users", []pg.ProjectInfo{{Name: "shop", Owner: "shop", Users: []pg.UserInfo{
 			{Name: "shop_admin", Kind: pg.AdminUser},
 			{Name: "shop_app", Kind: pg.AppUser, CanConnect: true, Expired: true},
 			{Name: "shop_boss", Kind: pg.AdminUser, Powers: []string{"CREATEROLE", "member of x, y"}, BelongsTo: "shop_boss"},
-		}}}, `[{"project":"shop","owner":"shop","owner_powers":[],"users":[` +
+		}}}, `[{"project":"shop","owner":"shop","owner_powers":[],"template":false,"foreign_owner":false,"users":[` +
 			`{"name":"shop_admin","type":"admin","powers":[],"belongs_to":"","can_connect":false,"expired":false},` +
 			`{"name":"shop_app","type":"application","powers":[],"belongs_to":"","can_connect":true,"expired":true},` +
 			`{"name":"shop_boss","type":"privileged","powers":["CREATEROLE","member of x, y"],"belongs_to":"shop_boss","can_connect":false,"expired":false}]}]`},
@@ -107,7 +107,7 @@ func TestListJSON(t *testing.T) {
 	}
 }
 
-// Value: protects=no project, owner or user name reaches the terminal with raw control or bidi characters, whichever column it is in; fails_when=printable() is dropped from a column or from powersNote; why_new=TestPrintList only puts the escape in a user name; seam=none
+// Value: protects=no project, owner or user name reaches the terminal with raw control or bidi characters, whichever column it is in; fails_when=printable() is dropped from a column, powersNote or the belongs-to note; why_new=TestPrintList only puts the escape in a user name; seam=none
 func TestPrintListEscapesEveryName(t *testing.T) {
 	// ESC (clears the screen), a newline (forges a line) and U+202E (reverses text).
 	hostile := "x\x1b[2J\n" + string(rune(0x202e))
@@ -122,6 +122,7 @@ func TestPrintListEscapesEveryName(t *testing.T) {
 		{"user", pg.ProjectInfo{Name: "p", Owner: "o", Users: []pg.UserInfo{{Name: hostile}}}},
 		{"user powers", pg.ProjectInfo{Name: "p", Owner: "o", Users: []pg.UserInfo{{Name: "p_u", Powers: []string{"owner of " + hostile}}}}},
 		{"owner powers", pg.ProjectInfo{Name: "p", Owner: "o", OwnerPowers: []string{"member of " + hostile}}},
+		{"belongs to", pg.ProjectInfo{Name: "p", Owner: "o", Users: []pg.UserInfo{{Name: "p_u", BelongsTo: hostile}}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

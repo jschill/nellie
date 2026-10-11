@@ -38,7 +38,7 @@ const shortPassword = 12
 // leaves out fields that are empty.
 type rotateResult struct {
 	User     string `json:"user"`
-	Database string `json:"database,omitempty"` // "" if no project database was found
+	Database string `json:"database,omitempty"` // "" if there's no usable project database (see pg.Rotation)
 	Password string `json:"password,omitempty"` // only when nellie generated it
 	URL      string `json:"url,omitempty"`      // only when Database is known
 }
@@ -123,6 +123,9 @@ func rotatePassword(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 	res := rotateResult{User: user, Database: rot.Database, Password: shown}
 	if rot.Database != "" {
 		res.URL = connURL(cfg, user, shown, rot.Database)
+	}
+	if rot.Template {
+		fmt.Fprintf(stderr, "nellie: warning: the project database of role %s is a template, so any role with CREATEDB can copy it, data included\n", user)
 	}
 	if len(rot.Powers) > 0 {
 		fmt.Fprintf(stderr, "nellie: warning: role %s has powers beyond its project (%s), and the new password carries them too\n",

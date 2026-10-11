@@ -29,11 +29,14 @@ func ClearExpirySQL(role string) string {
 // Rotation is what RotatePassword reports back besides success.
 type Rotation struct {
 	// Database is the role's project database, for a connection URL, or ""
-	// if none was found (see projectCandidates).
+	// when there's no usable one (see projectHome).
 	Database string
 	// Expired means the role's VALID UNTIL has passed. A new password doesn't
 	// change that, so the new password won't work either.
 	Expired bool
+	// Template means the role's home database is a template, so any CREATEDB
+	// role can copy it, data included.
+	Template bool
 	// Powers is what the role can do beyond its project that rotate-password
 	// doesn't refuse (CREATEDB, owning another database, ...), as nellie list
 	// shows it; nil for none. The new password carries those too.
@@ -83,9 +86,13 @@ func RotatePassword(ctx context.Context, cfg *pgx.ConnConfig, role, password str
 
 	// The password has changed by now, so a failed lookup mustn't read as a
 	// failed rotation: without a database the caller just prints no URL.
-	db, _ := projectDatabase(ctx, admin, role)
-	powers, _ := rolePowers(ctx, admin, role, db)
-	return Rotation{Database: db, Expired: expired, Powers: powers}, nil
+	home, usable, template, _ := projectHome(ctx, admin, role)
+	db := ""
+	if usable {
+		db = home
+	}
+	powers, _ := rolePowers(ctx, admin, role, home)
+	return Rotation{Database: db, Expired: expired, Template: template, Powers: powers}, nil
 }
 
 // checkRotatable refuses roles whose password nellie shouldn't change:
@@ -108,7 +115,7 @@ func checkRotatable(ctx context.Context, conn *pgx.Conn, role string) (expired b
 			coalesce((SELECT r.rolname FROM pg_roles r
 				WHERE r.rolname <> $1::name AND pg_has_role($1::name, r.oid, 'MEMBER')
 					AND (r.rolsuper OR r.rolcreaterole OR r.rolreplication OR r.rolbypassrls
-						OR (r.rolname LIKE 'pg\_%' AND r.rolname <> 'pg_database_owner'))
+						OR (starts_with(r.rolname, 'pg_') AND r.rolname <> 'pg_database_owner'))
 				ORDER BY r.rolname LIMIT 1), '')
 		FROM pg_roles WHERE rolname = $1::name`,
 		role,
@@ -147,30 +154,31 @@ func checkRotatable(ctx context.Context, conn *pgx.Conn, role string) (expired b
 	return expired, nil
 }
 
-// projectDatabase returns role's project database for the connection URL,
-// or "" for none. It's the longest of role's projectCandidates that exists,
-// by name alone, as nellie list decides (see ListSQL): picking by CONNECT
-// would let a CREATEDB role create a database named like the role, which
-// PUBLIC can connect to, and the URL with the new password would point there.
-// A URL is only given when that database is one of the admin's projects and
-// the role can connect to it; otherwise "" rather than a shorter database.
-func projectDatabase(ctx context.Context, conn *pgx.Conn, role string) (string, error) {
-	var db string
-	var usable bool
-	err := conn.QueryRow(ctx, `
-		SELECT datname,
-			datname NOT IN ('template0', 'template1') AND datconnlimit <> -2 -- -2 marks an invalid database
-				AND pg_has_role(datdba, 'USAGE') AND datallowconn
-				AND has_database_privilege($2::name, oid, 'CONNECT')
-		FROM pg_database
-		WHERE datname = ANY($1::text[])
-		ORDER BY length(datname) DESC LIMIT 1`,
+// projectHome returns role's home database, by name alone as nellie list
+// decides it (see ListSQL): the longest of role's projectCandidates that
+// exists, or "" for none. usable says whether a connection URL may name it:
+// it's one of the admin's projects, owned by the role named after it, and the
+// role can connect to it (canConnectExpr). A URL never names a shorter
+// database instead, and never one picked by access: a database's owner
+// controls CONNECT, and a CREATEDB role can create a database named like a
+// user, though not one owned by a role named after it. template says whether
+// the home is a template database.
+func projectHome(ctx context.Context, conn *pgx.Conn, role string) (home string, usable, template bool, err error) {
+	err = conn.QueryRow(ctx, `
+		SELECT d.datname,
+			d.datname NOT IN ('template0', 'template1') AND d.datconnlimit <> -2 -- -2 marks an invalid database
+				AND pg_has_role(d.datdba, 'USAGE') AND pg_get_userbyid(d.datdba) = d.datname
+				AND `+canConnectExpr+`,
+			d.datistemplate
+		FROM pg_database d, pg_roles r
+		WHERE d.datname = ANY($1::text[]) AND r.rolname = $2
+		ORDER BY length(d.datname) DESC LIMIT 1`,
 		projectCandidates(role), role,
-	).Scan(&db, &usable)
-	if errors.Is(err, pgx.ErrNoRows) || (err == nil && !usable) {
-		return "", nil
+	).Scan(&home, &usable, &template)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", false, false, nil
 	}
-	return db, err
+	return home, usable, template, err
 }
 
 // rolePowers returns role's powers beyond db (its project database, or ""),

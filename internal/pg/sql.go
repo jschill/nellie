@@ -144,6 +144,63 @@ func checkVersion(version int) error {
 	return nil
 }
 
+// ErrAmbiguous means a new name would make nellie's name-to-project mapping
+// ambiguous: list and rotate-password assign a role to the longest database
+// its name matches, so names must not overlap.
+var ErrAmbiguous = errors.New("name would be ambiguous")
+
+// checkProjectNameUnambiguous refuses a project name that existing roles or
+// databases already extend (<name>_...): they would, or could later, be read
+// as this project's users. pg_catalog is spelled out because the add-*
+// connections don't pin search_path.
+func checkProjectNameUnambiguous(ctx context.Context, conn *pgx.Conn, name string) error {
+	var dbs, roles []string
+	err := conn.QueryRow(ctx, `
+		SELECT
+			ARRAY(SELECT datname::text FROM pg_catalog.pg_database
+				WHERE pg_catalog.starts_with(datname, $1 || '_') ORDER BY 1),
+			ARRAY(SELECT rolname::text FROM pg_catalog.pg_roles
+				WHERE pg_catalog.starts_with(rolname, $1 || '_') ORDER BY 1)`,
+		name,
+	).Scan(&dbs, &roles)
+	if err != nil {
+		return fmt.Errorf("checking for names that start with %s_: %w", name, err)
+	}
+	var taken []string
+	for _, d := range dbs {
+		taken = append(taken, "database "+d)
+	}
+	for _, r := range roles {
+		taken = append(taken, "role "+r)
+	}
+	if len(taken) > 0 {
+		return fmt.Errorf("%w: %s already start with %s_, and nellie tells projects apart by name prefix; pick another project name",
+			ErrAmbiguous, strings.Join(taken, ", "), name)
+	}
+	return nil
+}
+
+// checkUserNameUnambiguous refuses a user name that a database longer than
+// its project would claim: user shop_v2_app of project shop while a database
+// shop_v2 exists.
+func checkUserNameUnambiguous(ctx context.Context, conn *pgx.Conn, user, project string) error {
+	var dbs []string
+	err := conn.QueryRow(ctx, `
+		SELECT ARRAY(SELECT datname::text FROM pg_catalog.pg_database
+			WHERE datname = ANY($1::text[]) AND pg_catalog.length(datname) > pg_catalog.length($2)
+			ORDER BY pg_catalog.length(datname) DESC)`,
+		projectCandidates(user), project,
+	).Scan(&dbs)
+	if err != nil {
+		return fmt.Errorf("checking for databases that would claim %s: %w", user, err)
+	}
+	if len(dbs) > 0 {
+		return fmt.Errorf("%w: user %s would belong to database %s by name, not to project %s; pick another suffix",
+			ErrAmbiguous, user, dbs[0], project)
+	}
+	return nil
+}
+
 // checkNamesFree returns ErrExists if any of the databases or roles exist.
 func checkNamesFree(ctx context.Context, conn *pgx.Conn, dbs, roles []string) error {
 	var takenDBs, takenRoles []string

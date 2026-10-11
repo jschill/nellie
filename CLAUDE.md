@@ -70,10 +70,13 @@ are superusers, are the admin itself, have `CREATEROLE`, `REPLICATION` or
 role except `pg_database_owner` (`list` shows those as `privileged`); it warns when the role's `VALID UNTIL` has passed. Piped input must
 be a single line. The URL's database is the longest prefix
 of the role name (cut at `_`, or the whole name) that is an existing
-database, by name alone like `list`; there's a URL only if that database is
-one of the admin's projects and the role can connect to it (never a shorter
-one: picking by CONNECT let a CREATEDB role redirect the URL). It warns, like
-`list`, when the role has powers beyond its project (`rolePowers`).
+database, by name alone like `list` (`projectHome`); there's a URL only if
+that database is one of the admin's projects, owned by the role named after
+it, and the role can connect to it (`canConnectExpr`, shared with `list`).
+Never a shorter one: picking by CONNECT let database owners redirect the URL,
+and the owner rule stops a CREATEDB role's look-alike database. It warns,
+like `list`, about powers beyond the project (`rolePowers`, computed against
+the name-picked home) and template home databases.
 
 `list` shows the databases whose owner's privileges the admin has
 (`pg_has_role(datdba, 'USAGE')`, as in `add-user`; not `'MEMBER'`, which on
@@ -96,7 +99,9 @@ matches a user's name), or owns another database (directly or through
 membership; compare database OIDs, not owner OIDs), listed in `powers`, one
 power per array element so a name containing ", " can't fake one; the rest
 are `application`. The owner's powers are computed the same way
-(`owner_powers`), by one shared SQL fragment (`powersExpr`, also used by
+(`owner_powers`); projects also carry `template` and `foreign_owner` (owner
+not named after the database), both noted on the project line. Powers come
+from one shared SQL fragment (`powersExpr`, also used by
 `rotate-password`); superusers and `CREATEROLE` roles skip the memberships,
 which would list every role they manage. On Postgres 15 an owner can revoke the admin's membership
 and so drop out of `list`; that's documented, not handled. It runs `pg.ListSQL` (one query, no
@@ -196,6 +201,12 @@ more restricted users are added separately.
 - Names: `^[a-z][a-z0-9_]*$`, no `pg_` prefix, so they're valid unquoted
   identifiers. Users max 63 chars; projects max 57, so the default
   `<project>_admin` still fits.
+- Names map to projects by longest prefix (`list`, `rotate-password`), so
+  they must not overlap (`ErrAmbiguous`, JSC-3): `add-project <p>` refuses
+  when a role or database named `<p>_…` exists, and `add-user` refuses a name
+  that a database longer than its project would claim. Names that overlap
+  from before stay possible; `list` and `rotate-password` assign them by name
+  and only give a URL for a database owned by the role named after it.
 
 ## Safety rules
 

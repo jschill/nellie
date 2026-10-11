@@ -71,6 +71,17 @@ func TestListCommand(t *testing.T) {
 		}
 	})
 
+	// The admin is a member of a role that owns another database, which
+	// would be a "member of" power if CREATEROLE owners weren't skipped.
+	grp := base + "_grp"
+	exec("CREATE ROLE " + pgx.Identifier{grp}.Sanitize() + " NOLOGIN")
+	exec("GRANT " + pgx.Identifier{grp}.Sanitize() + " TO " + pgx.Identifier{adminCfg.User}.Sanitize())
+	exec("CREATE DATABASE " + pgx.Identifier{grp + "_db"}.Sanitize() + " OWNER " + pgx.Identifier{grp}.Sanitize())
+	t.Cleanup(func() {
+		admin.Exec(context.Background(), "DROP DATABASE IF EXISTS "+pgx.Identifier{grp + "_db"}.Sanitize())
+		admin.Exec(context.Background(), "DROP ROLE IF EXISTS "+pgx.Identifier{grp}.Sanitize())
+	})
+
 	run := func(t *testing.T, args ...string) string {
 		t.Helper()
 		var stdout, stderr bytes.Buffer
@@ -92,8 +103,8 @@ func TestListCommand(t *testing.T) {
 			byName[p.Project] = p
 		}
 		want := []listProject{
-			{Project: empty, Owner: adminCfg.User, Users: []listUser{}},
-			{Project: full, Owner: adminCfg.User, Users: []listUser{{Name: user, Type: "application", Powers: []string{}, CanConnect: true}}},
+			{Project: empty, Owner: adminCfg.User, ForeignOwner: true, Users: []listUser{}},
+			{Project: full, Owner: adminCfg.User, ForeignOwner: true, Users: []listUser{{Name: user, Type: "application", Powers: []string{}, CanConnect: true}}},
 		}
 		for _, w := range want {
 			g := byName[w.Project]
@@ -131,8 +142,8 @@ func TestListCommand(t *testing.T) {
 		// The admin owns both databases, so their project lines also list its
 		// powers, which depend on the server: match up to them.
 		for _, re := range []string{
-			`(?m)^` + empty + `  \(owner ` + adminCfg.User + `, privileged: .*\)\n  no users yet; add one with "nellie add-user"\n`,
-			`(?m)^` + full + `  \(owner ` + adminCfg.User + `, privileged: .*\)\n  ` + user + `  application\n`,
+			`(?m)^` + empty + `  \(owner ` + adminCfg.User + `; .*\)\n  no users yet; add one with "nellie add-user"\n`,
+			`(?m)^` + full + `  \(owner ` + adminCfg.User + `; .*\)\n  ` + user + `  application\n`,
 		} {
 			if !regexp.MustCompile(re).MatchString(out) {
 				t.Errorf("output doesn't match\n%s\ngot:\n%s", re, out)

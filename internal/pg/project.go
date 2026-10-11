@@ -67,6 +67,9 @@ func CreateProject(ctx context.Context, cfg *pgx.ConnConfig, p Project, password
 	if err := checkNamesFree(ctx, admin, []string{p.Name}, []string{p.Name}); err != nil {
 		return err
 	}
+	if err := checkProjectNameUnambiguous(ctx, admin, p.Name); err != nil {
+		return err
+	}
 
 	if err := runTx(ctx, admin, plan.Roles); err != nil {
 		return fmt.Errorf("creating role: %w", err)

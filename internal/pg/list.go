@@ -30,29 +30,33 @@ import (
 // users: where each role is shown. That's its home when the home is a
 // project. Otherwise, so no role silently disappears (a CREATEDB role can
 // create a database named like a user), it's the longest project its name
-// matches, with belongs_to naming the home. A role whose name matches no
-// project isn't listed. A home's owner is that database's owner, not a user,
-// and the admin role itself is no project's user, so both are left out.
+// matches, with belongs_to naming the home; that includes a role that owns
+// its home. A role whose name matches no project isn't listed. The shown
+// project's owner is its owner, not a user, so users drops it (by OID);
+// homes already left out the admin role itself (current_user, session_user).
 //
 // Any member of the owner is an admin user (see User.Plan), here 'MEMBER' on
 // purpose, erring towards admin: a NOINHERIT member doesn't use the owner's
 // privileges directly but can SET ROLE to the owner, and the rare Postgres 16+
 // grant with neither INHERIT nor SET still ties the role to the owner.
 //
-// can_connect needs the database to allow connections (datallowconn), and,
-// except for superusers, neither the database's nor the role's connection
-// limit to be 0, as well as CONNECT: the privilege alone ignores all three.
+// can_connect: see canConnectExpr. A project is marked when it's a template
+// (any CREATEDB role can copy it, data included) and when its owner isn't the
+// role named after it (foreign_owner): nellie's projects always are, and only
+// those get a connection URL from rotate-password.
 //
 // powers (see powersExpr) is computed once for every listed user and owner,
 // then joined to both. The LEFT JOINs keep projects without users, as a row
 // with empty user columns.
 const ListSQL = `WITH projects AS (
-	SELECT oid, datname, datdba, datallowconn, datconnlimit FROM pg_database
+	SELECT oid, datname, datdba, datistemplate,
+		pg_get_userbyid(datdba) <> datname AS foreign_owner
+	FROM pg_database
 	WHERE datconnlimit <> -2 AND datname NOT IN ('template0', 'template1')
 		AND pg_has_role(datdba, 'USAGE')
 ), homes AS (
 	SELECT DISTINCT ON (r.rolname) r.oid AS role, r.rolname,
-		d.oid AS home, d.datname AS home_name, d.datdba AS home_owner
+		d.oid AS home, d.datname AS home_name
 	FROM pg_roles r
 	JOIN pg_database d ON r.rolname = d.datname OR starts_with(r.rolname, d.datname || '_')
 	WHERE r.rolcanlogin AND r.rolname NOT IN (current_user, session_user)
@@ -66,24 +70,32 @@ const ListSQL = `WITH projects AS (
 		WHERE h.rolname = p.datname OR starts_with(h.rolname, p.datname || '_')
 		ORDER BY length(p.datname) DESC LIMIT 1
 	) p
-	WHERE h.role <> h.home_owner AND h.role <> p.datdba
+	WHERE h.role <> p.datdba
 ), ` + poweredCTE + `, powers AS (
 	SELECT s.project, s.role, ` + powersExpr + ` AS list
 	FROM (SELECT project, role FROM users UNION SELECT oid, datdba FROM projects) s
 	JOIN pg_roles r ON r.oid = s.role
 )
 SELECT p.datname, pg_get_userbyid(p.datdba), coalesce(op.list, '{}'),
+	p.datistemplate, p.foreign_owner,
 	coalesce(u.rolname, ''), coalesce(u.belongs_to, ''),
 	coalesce(pg_has_role(r.oid, p.datdba, 'MEMBER'), false),
-	coalesce(p.datallowconn AND (r.rolsuper OR (p.datconnlimit <> 0 AND r.rolconnlimit <> 0))
-		AND has_database_privilege(r.oid, p.oid, 'CONNECT'), false),
+	coalesce(` + canConnectExpr + `, false),
 	coalesce(up.list, '{}'), coalesce(r.rolvaliduntil < now(), false)
 FROM projects p
+JOIN pg_database d ON d.oid = p.oid
 LEFT JOIN powers op ON op.project = p.oid AND op.role = p.datdba
 LEFT JOIN users u ON u.project = p.oid
 LEFT JOIN pg_roles r ON r.oid = u.role
 LEFT JOIN powers up ON up.project = u.project AND up.role = u.role
 ORDER BY p.datname, u.rolname`
+
+// canConnectExpr is whether role r may connect to database d: the database
+// allows connections (datallowconn), and, except for superusers, neither the
+// database's nor the role's connection limit is 0, as well as CONNECT; the
+// privilege alone ignores all three. Shared with rotate-password's URL check.
+const canConnectExpr = `d.datallowconn AND (r.rolsuper OR (d.datconnlimit <> 0 AND r.rolconnlimit <> 0))
+		AND has_database_privilege(r.oid, d.oid, 'CONNECT')`
 
 // poweredCTE and powersExpr compute what makes a role privileged beyond its
 // project, for ListSQL and rotate-password's warning, so the two can't drift
@@ -137,6 +149,11 @@ func ListScript() string {
 type ProjectInfo struct {
 	Name  string // the database
 	Owner string // the role that owns it
+	// Template means any CREATEDB role can copy the database, data included.
+	Template bool
+	// ForeignOwner means the owner isn't the role named after the database,
+	// as it is for projects nellie creates.
+	ForeignOwner bool
 	// OwnerPowers is what makes the owner privileged beyond this project, as
 	// for UserInfo.Powers; nil for none.
 	OwnerPowers []string
@@ -189,13 +206,14 @@ func ListProjects(ctx context.Context, cfg *pgx.ConnConfig) ([]ProjectInfo, erro
 	for rows.Next() {
 		var db, owner, user, belongsTo string
 		var ownerPowers, powers []string
-		var admin, canConnect, expired bool
-		if err := rows.Scan(&db, &owner, &ownerPowers, &user, &belongsTo, &admin, &canConnect, &powers, &expired); err != nil {
+		var template, foreignOwner, admin, canConnect, expired bool
+		if err := rows.Scan(&db, &owner, &ownerPowers, &template, &foreignOwner, &user, &belongsTo, &admin, &canConnect, &powers, &expired); err != nil {
 			return nil, fmt.Errorf("listing projects: %w", err)
 		}
 		// Rows come sorted by project, so a new name starts a new project.
 		if len(projects) == 0 || projects[len(projects)-1].Name != db {
-			projects = append(projects, ProjectInfo{Name: db, Owner: owner, OwnerPowers: noneIfEmpty(ownerPowers)})
+			projects = append(projects, ProjectInfo{Name: db, Owner: owner, OwnerPowers: noneIfEmpty(ownerPowers),
+				Template: template, ForeignOwner: foreignOwner})
 		}
 		if user == "" {
 			continue // a project without users

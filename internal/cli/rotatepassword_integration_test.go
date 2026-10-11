@@ -59,8 +59,13 @@ func TestRotatePasswordCommand(t *testing.T) {
 	base := "nellie_cli_it_" + strings.ToLower(rand.Text()[:8])
 	project := base + "_v2"
 	user := project + "_app"
+	// Each owned by the role named after it, as nellie's projects are: only
+	// those get a URL.
 	for _, db := range []string{base, project} {
-		exec("CREATE DATABASE " + pgx.Identifier{db}.Sanitize())
+		id := pgx.Identifier{db}.Sanitize()
+		exec("CREATE ROLE " + id + " NOLOGIN")
+		exec("GRANT " + id + " TO " + pgx.Identifier{adminCfg.User}.Sanitize())
+		exec("CREATE DATABASE " + id + " OWNER " + id)
 	}
 	exec("CREATE ROLE " + pgx.Identifier{user}.Sanitize() + " LOGIN")
 	t.Cleanup(func() {
@@ -68,6 +73,8 @@ func TestRotatePasswordCommand(t *testing.T) {
 			"DROP ROLE IF EXISTS " + pgx.Identifier{user}.Sanitize(),
 			"DROP DATABASE IF EXISTS " + pgx.Identifier{project}.Sanitize(),
 			"DROP DATABASE IF EXISTS " + pgx.Identifier{base}.Sanitize(),
+			"DROP ROLE IF EXISTS " + pgx.Identifier{project}.Sanitize(),
+			"DROP ROLE IF EXISTS " + pgx.Identifier{base}.Sanitize(),
 		} {
 			admin.Exec(context.Background(), sql)
 		}
@@ -159,6 +166,25 @@ func TestRotatePasswordCommand(t *testing.T) {
 	})
 
 	// Value: protects=an expired VALID UNTIL is reported on stderr while --json stdout stays valid JSON; fails_when=the warning is dropped or printed to stdout; why_new=only pg.Rotation.Expired was tested; seam=none
+	// Value: protects=powers beyond the project are warned about on stderr, never in --json stdout; fails_when=the warning is dropped or printed to stdout; why_new=new warning; seam=none
+	t.Run("powers warn on stderr", func(t *testing.T) {
+		maker := "nellie_cli_it_pow_" + strings.ToLower(rand.Text()[:8])
+		exec("CREATE ROLE " + pgx.Identifier{maker}.Sanitize() + " LOGIN CREATEDB")
+		t.Cleanup(func() { admin.Exec(context.Background(), "DROP ROLE IF EXISTS "+pgx.Identifier{maker}.Sanitize()) })
+
+		var stdout, stderr bytes.Buffer
+		if code := Run([]string{"rotate-password", "--json", "--generate", maker}, strings.NewReader(""), &stdout, &stderr); code != exitOK {
+			t.Fatalf("exit code %d, stderr:\n%s", code, stderr.String())
+		}
+		var res map[string]string
+		if err := json.Unmarshal(stdout.Bytes(), &res); err != nil {
+			t.Fatalf("stdout isn't JSON: %v\n%s", err, stdout.String())
+		}
+		if !strings.Contains(stderr.String(), "powers beyond its project (CREATEDB)") || strings.Contains(stdout.String(), "CREATEDB") {
+			t.Errorf("the warning belongs on stderr only; stdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
+		}
+	})
+
 	t.Run("expired role warns on stderr", func(t *testing.T) {
 		expired := "nellie_cli_it_exp_" + strings.ToLower(rand.Text()[:8])
 		exec("CREATE ROLE " + pgx.Identifier{expired}.Sanitize() + " LOGIN VALID UNTIL '2000-01-01'")
