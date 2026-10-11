@@ -70,6 +70,16 @@ func RotatePassword(ctx context.Context, cfg *pgx.ConnConfig, role, password str
 	if err != nil {
 		return Rotation{}, err
 	}
+	// Only roles nellie list shows: on Postgres 15 a CREATEROLE admin may
+	// change any ordinary role's password, including other services' roles.
+	shown, template, err := shownProject(ctx, admin, role)
+	if err != nil {
+		return Rotation{}, fmt.Errorf("looking up the project of role %q: %w", role, err)
+	}
+	if shown == "" {
+		return Rotation{}, fmt.Errorf("role %q isn't in any project the admin can act for, so nellie list doesn't show it; "+
+			"change its password with psql's \\password instead", role)
+	}
 	// A single statement is its own transaction, so no runTx here.
 	if _, err := admin.Exec(ctx, RotateSQL(role, verifier)); err != nil {
 		var pgErr *pgconn.PgError
@@ -94,10 +104,8 @@ func RotatePassword(ctx context.Context, cfg *pgx.ConnConfig, role, password str
 	}
 	// The warnings are about the project nellie list shows the role under,
 	// so the two commands agree.
-	if shown, template, err := shownProject(ctx, admin, role); err == nil {
-		rot.Template = template
-		rot.Powers, _ = rolePowers(ctx, admin, role, shown)
-	}
+	rot.Template = template
+	rot.Powers, _ = rolePowers(ctx, admin, role, shown)
 	return rot, nil
 }
 

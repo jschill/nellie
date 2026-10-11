@@ -81,7 +81,7 @@ func TestRotatePasswordCommand(t *testing.T) {
 		}
 	})
 
-	// orphan has no project database at all.
+	// orphan isn't in any project, so rotate-password refuses it.
 	orphan := "nellie_cli_it_orphan_" + strings.ToLower(rand.Text()[:8])
 	exec("CREATE ROLE " + pgx.Identifier{orphan}.Sanitize() + " LOGIN")
 	t.Cleanup(func() { admin.Exec(context.Background(), "DROP ROLE IF EXISTS "+pgx.Identifier{orphan}.Sanitize()) })
@@ -182,7 +182,7 @@ func TestRotatePasswordCommand(t *testing.T) {
 
 	// Value: protects=powers beyond the project are warned about on stderr and listed in --json's powers field; fails_when=the warning or the field is dropped; why_new=new warning; seam=none
 	t.Run("powers warn on stderr", func(t *testing.T) {
-		maker := "nellie_cli_it_pow_" + strings.ToLower(rand.Text()[:8])
+		maker := project + "_pow"
 		exec("CREATE ROLE " + pgx.Identifier{maker}.Sanitize() + " LOGIN CREATEDB")
 		t.Cleanup(func() { admin.Exec(context.Background(), "DROP ROLE IF EXISTS "+pgx.Identifier{maker}.Sanitize()) })
 
@@ -219,7 +219,7 @@ func TestRotatePasswordCommand(t *testing.T) {
 
 	// Value: protects=an expired VALID UNTIL is reported on stderr and as expired in --json; fails_when=the warning or the field is dropped, or the warning goes to stdout; why_new=only pg.Rotation.Expired was tested; seam=none
 	t.Run("expired role warns on stderr", func(t *testing.T) {
-		expired := "nellie_cli_it_exp_" + strings.ToLower(rand.Text()[:8])
+		expired := project + "_exp"
 		exec("CREATE ROLE " + pgx.Identifier{expired}.Sanitize() + " LOGIN VALID UNTIL '2000-01-01'")
 		t.Cleanup(func() { admin.Exec(context.Background(), "DROP ROLE IF EXISTS "+pgx.Identifier{expired}.Sanitize()) })
 
@@ -233,21 +233,36 @@ func TestRotatePasswordCommand(t *testing.T) {
 		}
 	})
 
-	t.Run("no project database", func(t *testing.T) {
-		out, _ := run(t, "", orphan, "--json", "--generate")
-		res, raw := decode(t, out)
-		if _, ok := raw["database"]; ok {
-			t.Errorf("database present without a project: %s", out)
+	// Value: protects=a role outside every project is refused with exit 1 and nothing on stdout; fails_when=rotate-password changes passwords of roles nellie list doesn't show; why_new=adversarial review: Postgres 15 lets a CREATEROLE admin rotate any ordinary role; seam=none
+	t.Run("outside every project", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := Run([]string{"rotate-password", "--json", "--generate", orphan}, strings.NewReader(""), &stdout, &stderr)
+		if code != exitError || stdout.Len() != 0 || !strings.Contains(stderr.String(), "isn't in any project") {
+			t.Errorf("exit %d, stdout %q, stderr %q; want exit 1 and a refusal", code, stdout.String(), stderr.String())
 		}
-		if _, ok := raw["url"]; ok {
-			t.Errorf("url present without a project: %s", out)
-		}
-		canLogIn(t, orphan, res.Password, "")
+	})
 
-		human, _ := run(t, "", orphan, "--generate")
+	// A project role that can't connect gets no URL.
+	t.Run("no usable project database", func(t *testing.T) {
+		stuck := project + "_stuck"
+		id := pgx.Identifier{stuck}.Sanitize()
+		exec("CREATE ROLE " + id + " LOGIN CONNECTION LIMIT 0")
+		t.Cleanup(func() { admin.Exec(context.Background(), "DROP ROLE IF EXISTS "+id) })
+
+		human, _ := run(t, "", stuck, "--generate")
 		if !strings.Contains(human, "password: ") || strings.Contains(human, "postgres://") {
 			t.Errorf("without a URL the generated password should be printed on its own:\n%s", human)
 		}
+		out, _ := run(t, "", stuck, "--json", "--generate")
+		res, raw := decode(t, out)
+		if _, ok := raw["database"]; ok {
+			t.Errorf("database present for a role that can't connect: %s", out)
+		}
+		if _, ok := raw["url"]; ok {
+			t.Errorf("url present for a role that can't connect: %s", out)
+		}
+		exec("ALTER ROLE " + id + " CONNECTION LIMIT -1")
+		canLogIn(t, stuck, res.Password, project)
 	})
 }
 

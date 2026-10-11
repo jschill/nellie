@@ -134,9 +134,10 @@ func TestRotatePasswordReportsExpiry(t *testing.T) {
 	}
 	t.Cleanup(func() { admin.Close(context.Background()) }) // see TestRotatePasswordRefuses
 
-	role := "nellie_it_expired_" + strings.ToLower(NewPassword()[:8])
+	p, _, dropUsers := newTestProject(t, cfg) // rotate-password only takes project roles
+	role := p.Name + "_expired"
+	*dropUsers = append(*dropUsers, role)
 	mustExec(t, admin, "CREATE ROLE "+ident(role)+" LOGIN VALID UNTIL '2000-01-01'")
-	t.Cleanup(func() { admin.Exec(context.Background(), "DROP ROLE IF EXISTS "+ident(role)) })
 
 	rot, err := RotatePassword(ctx, cfg, role, NewPassword())
 	if err != nil {
@@ -259,8 +260,10 @@ func TestRotatePasswordPicksProjectByName(t *testing.T) {
 		})
 		mustExec(t, admin, "REVOKE "+ident(q)+" FROM "+ident(cfg.User))
 		mustExec(t, admin, "CREATE ROLE "+ident(qApp)+" LOGIN")
-		if db := rotate(qApp); db != "" {
-			t.Errorf("database = %q, want none: the admin can't act for %s's owner", db, q)
+		// Not a project of the admin's, so nellie list doesn't show q_app,
+		// and rotate-password won't touch it.
+		if _, err := RotatePassword(ctx, cfg, qApp, NewPassword()); err == nil || !strings.Contains(err.Error(), "isn't in any project") {
+			t.Errorf("rotating %s: got %v, want a refusal: the admin can't act for %s's owner", qApp, err, q)
 		}
 		// Control: with the membership back, the same database gets the URL,
 		// so membership is what made the difference above.
@@ -560,5 +563,54 @@ func TestProjectNameIgnoresTheAdmin(t *testing.T) {
 	}
 	if err := checkProjectNameUnambiguous(ctx, admin, q); !errors.Is(err, ErrAmbiguous) {
 		t.Errorf("as %s, project %s: %v, want ErrAmbiguous for %s", cfg.User, q, err, role)
+	}
+}
+
+// Value: protects=rotate-password only changes roles nellie list shows, never another service's role, which a CREATEROLE admin on Postgres 15 could otherwise rotate; fails_when=the shownProject check before ALTER ROLE goes; why_new=adversarial review; seam=none
+func TestRotatePasswordRefusesRolesOutsideProjects(t *testing.T) {
+	ctx := context.Background()
+	cfg := adminConfig(t)
+	admin, err := pgx.ConnectConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { admin.Close(context.Background()) })
+
+	role := "nellie_it_stranger_" + strings.ToLower(NewPassword()[:8])
+	mustExec(t, admin, "CREATE ROLE "+ident(role)+" LOGIN PASSWORD NULL")
+	t.Cleanup(func() { admin.Exec(context.Background(), "DROP ROLE IF EXISTS "+ident(role)) })
+
+	_, err = RotatePassword(ctx, cfg, role, NewPassword())
+	if err == nil || !strings.Contains(err.Error(), "isn't in any project") {
+		t.Fatalf("got %v, want a refusal for a role outside every project", err)
+	}
+	var hasPassword bool
+	if err := admin.QueryRow(ctx, "SELECT rolpassword IS NOT NULL FROM pg_authid WHERE rolname = $1", role).Scan(&hasPassword); err == nil && hasPassword {
+		t.Errorf("role %s got a password despite the refusal", role)
+	}
+}
+
+// Value: protects=a NOINHERIT admin gets a clear error instead of an empty list and misleading add-user refusals; fails_when=pinSession's rolinherit check goes; why_new=adversarial review; seam=none
+func TestPinSessionRefusesNoInheritAdmin(t *testing.T) {
+	ctx := context.Background()
+	cfg := adminConfig(t)
+	admin, err := pgx.ConnectConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { admin.Close(context.Background()) })
+
+	role, password := "nellie_it_noinherit_"+strings.ToLower(NewPassword()[:8]), NewPassword()
+	verifier, err := scramVerifier(password)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustExec(t, admin, "CREATE ROLE "+ident(role)+" LOGIN NOINHERIT CREATEROLE CREATEDB PASSWORD "+literal(verifier))
+	t.Cleanup(func() { admin.Exec(context.Background(), "DROP ROLE IF EXISTS "+ident(role)) })
+
+	asRole := cfg.Copy()
+	asRole.User, asRole.Password = role, password
+	if _, err := ListProjects(ctx, asRole); err == nil || !strings.Contains(err.Error(), "NOINHERIT") {
+		t.Errorf("ListProjects as a NOINHERIT admin: got %v, want a refusal naming NOINHERIT", err)
 	}
 }

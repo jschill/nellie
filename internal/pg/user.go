@@ -117,8 +117,10 @@ func AddUser(ctx context.Context, cfg *pgx.ConnConfig, u User, password string) 
 	// unqualified name: pin search_path and refuse a switched role first, as
 	// list and rotate-password do. AddUser's second connection, to the
 	// project database, isn't pinned: its GRANT and ALTER DEFAULT PRIVILEGES
-	// statements evaluate nothing search_path could change, and a role switch
-	// there makes ALTER DEFAULT PRIVILEGES FOR ROLE <owner> fail anyway.
+	// statements evaluate nothing search_path could change. The database's
+	// owner can switch that session's role, but only to the owner or a role
+	// that can act as it, which grants the same; any other role makes ALTER
+	// DEFAULT PRIVILEGES FOR ROLE <owner> fail and the grants roll back.
 	if err := pinSession(ctx, admin); err != nil {
 		return err
 	}

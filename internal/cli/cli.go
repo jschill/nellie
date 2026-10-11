@@ -14,6 +14,8 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -116,12 +118,23 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 // would carry the admin password into shell history and the process list.
 func connConfig(p *prompter) (*pgx.ConnConfig, error) {
 	if dsn := os.Getenv("DATABASE_URL"); dsn != "" || hasPGEnv() {
-		if dsn != "" && fromDotenv["DATABASE_URL"] {
-			if err := requireOwnPassword(dsn); err != nil {
-				return nil, err
-			}
+		if dsn == "" || !fromDotenv["DATABASE_URL"] {
+			return parseAdmin(dsn)
 		}
-		return parseAdmin(dsn)
+		// From .env: a checked-out repo may have chosen this server.
+		if hasPGEnv() {
+			return nil, errors.New("DATABASE_URL comes from .env, but PG* connection settings are set in your shell, " +
+				"and nellie won't guess which server you mean; unset one of them")
+		}
+		if err := requireOwnPassword(dsn); err != nil {
+			return nil, err
+		}
+		cfg, err := parseAdmin(dsn)
+		if err != nil {
+			return nil, err
+		}
+		fmt.Fprintf(p.out, "nellie: using DATABASE_URL from .env (host %s)\n", printable(cfg.Host))
+		return cfg, nil
 	}
 
 	for {
@@ -340,14 +353,36 @@ func parseFlags(cmd command, args []string, stderr io.Writer) (opts options, cod
 func fail(stderr io.Writer, err error) int {
 	if errors.Is(err, errInterrupted) || errors.Is(err, context.Canceled) {
 		if errors.Is(err, pg.ErrCleanupFailed) {
-			fmt.Fprintf(stderr, "nellie: interrupted: %v\n", err)
+			fmt.Fprintf(stderr, "nellie: interrupted: %s\n", terminalSafe(err.Error()))
 		} else {
 			fmt.Fprintln(stderr, "nellie: interrupted")
 		}
 		return exitInterrupted
 	}
-	fmt.Fprintf(stderr, "nellie: %v\n", err)
+	fmt.Fprintf(stderr, "nellie: %s\n", terminalSafe(err.Error()))
 	return exitError
+}
+
+// terminalSafe escapes what a terminal would interpret in s: control
+// characters other than newline and tab, other non-printing runes, and
+// invalid UTF-8. Error text can come from the server, which could otherwise
+// send escape sequences to the user's terminal.
+func terminalSafe(s string) string {
+	var b strings.Builder
+	for len(s) > 0 {
+		r, size := utf8.DecodeRuneInString(s)
+		switch {
+		case r == utf8.RuneError && size == 1:
+			fmt.Fprintf(&b, `\x%02x`, s[0])
+		case r != '\n' && r != '\t' && !unicode.IsPrint(r):
+			q := strconv.QuoteRune(r)
+			b.WriteString(q[1 : len(q)-1])
+		default:
+			b.WriteString(s[:size])
+		}
+		s = s[size:]
+	}
+	return b.String()
 }
 
 // connURL builds a connection string for a project role on the same server

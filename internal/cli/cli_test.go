@@ -472,7 +472,6 @@ func TestDryRunIsMarkedNotRunnable(t *testing.T) {
 func TestDotenvURLNeedsItsOwnPassword(t *testing.T) {
 	saved := fromDotenv
 	t.Cleanup(func() { fromDotenv = saved })
-	p := newPrompter(strings.NewReader(""), &bytes.Buffer{}) // any read would fail
 
 	// Files a URL could point pgx at, each holding a password.
 	dir := t.TempDir()
@@ -491,7 +490,7 @@ func TestDotenvURLNeedsItsOwnPassword(t *testing.T) {
 		u := url.URL{Scheme: "postgres", User: user, Host: "other.example", Path: "/postgres", RawQuery: query.Encode()}
 		return u.String()
 	}
-	const noPassword, otherKey = "no password of its own", "sets something other than"
+	const noPassword, otherKey, pgEnv = "no password of its own", "sets something other than", "PG* connection settings are set in your shell"
 	tests := []struct {
 		name     string
 		url      string
@@ -502,21 +501,25 @@ func TestDotenvURLNeedsItsOwnPassword(t *testing.T) {
 	}{
 		{name: "no password in .env", url: dbURL(url.User("admin"), nil), wantErr: noPassword},
 		{name: "password in .env", url: dbURL(url.UserPassword("admin", "own"), nil), wantPW: "own"},
+		{name: "PGPASSWORD in the shell", url: dbURL(url.User("admin"), nil),
+			env: map[string]string{"PGPASSWORD": "admin-secret"}, wantErr: pgEnv},
+		{name: "PGHOST in the shell", url: dbURL(url.UserPassword("admin", "own"), nil),
+			env: map[string]string{"PGHOST": "prod.example"}, wantErr: pgEnv},
 		{name: "passfile from the environment", url: dbURL(url.User("admin"), nil),
 			env: map[string]string{"PGPASSFILE": passfile}, wantErr: noPassword},
 		{name: "service from the environment", url: dbURL(url.User("admin"), nil),
-			env: map[string]string{"PGSERVICEFILE": servicefile, "PGSERVICE": "prod"}, wantErr: noPassword},
+			env: map[string]string{"PGSERVICEFILE": servicefile, "PGSERVICE": "prod"}, wantErr: pgEnv},
 		{name: "passfile in the URL", url: dbURL(url.User("admin"), url.Values{"passfile": {passfile}}), wantErr: otherKey},
 		{name: "service in the URL", url: dbURL(url.User("admin"), url.Values{"service": {"prod"}, "servicefile": {servicefile}}),
 			wantErr: otherKey},
 		{name: "service in keyword form", url: "host=other.example user=admin service=prod servicefile=" + servicefile,
 			wantErr: otherKey},
-		{name: "no password, exported", url: dbURL(url.User("admin"), nil), exported: true, wantPW: "admin-secret"},
+		{name: "no password, exported", url: dbURL(url.User("admin"), nil),
+			env: map[string]string{"PGPASSWORD": "admin-secret"}, exported: true, wantPW: "admin-secret"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			clearConnEnv(t)
-			t.Setenv("PGPASSWORD", "admin-secret")
 			t.Setenv("PGPASSFILE", os.DevNull)
 			t.Setenv("PGSERVICEFILE", os.DevNull)
 			for k, v := range tt.env {
@@ -536,6 +539,8 @@ func TestDotenvURLNeedsItsOwnPassword(t *testing.T) {
 				}
 			}
 
+			var notes bytes.Buffer
+			p := newPrompter(strings.NewReader(""), &notes) // any read would fail
 			cfg, err := connConfig(p)
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
@@ -552,9 +557,28 @@ func TestDotenvURLNeedsItsOwnPassword(t *testing.T) {
 			if cfg.Password != tt.wantPW {
 				t.Errorf("password = %q, want %q", cfg.Password, tt.wantPW)
 			}
-			if got := os.Getenv("PGPASSWORD"); got != "admin-secret" {
-				t.Errorf("PGPASSWORD = %q after connConfig, want it restored", got)
+			if fromFile := !tt.exported; fromFile != strings.Contains(notes.String(), "from .env (host other.example)") {
+				t.Errorf("notes = %q, want the .env host named only for a URL from .env", notes.String())
 			}
 		})
+	}
+}
+
+// Value: protects=error text, which can come from a hostile server, can't send terminal escapes; fails_when=fail prints err raw again; why_new=adversarial review; seam=none
+func TestFailEscapesControlCharacters(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{"plain\nsecond line\tok", "plain\nsecond line\tok"},
+		{"bad \x1b[2J clear", `bad \x1b[2J clear`},
+		{"c1 \u009b csi", `c1 \u009b csi`},
+		{"invalid \xff byte", `invalid \xff byte`},
+		{"bidi \u202e flip", `bidi \u202e flip`},
+		{"umlaut ä stays", "umlaut ä stays"},
+	}
+	for _, tt := range tests {
+		var stderr bytes.Buffer
+		fail(&stderr, errors.New(tt.in))
+		if got, want := stderr.String(), "nellie: "+tt.want+"\n"; got != want {
+			t.Errorf("fail(%q) printed %q, want %q", tt.in, got, want)
+		}
 	}
 }

@@ -39,6 +39,17 @@ EMPTY=
 	}
 }
 
+// Value: protects=a .env saved with a byte order mark still sets its first key; fails_when=the BOM strip goes, so the key becomes "\ufeffDATABASE_URL" and nellie silently asks instead; why_new=adversarial review; seam=none
+func TestParseDotenvSkipsByteOrderMark(t *testing.T) {
+	got, err := parseDotenv(strings.NewReader("\ufeffDATABASE_URL=postgres://localhost/postgres\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].key != "DATABASE_URL" {
+		t.Errorf("got %q, want the key DATABASE_URL", got)
+	}
+}
+
 func TestParseDotenvErrorsHideTheLine(t *testing.T) {
 	for _, input := range []string{
 		"no equals sign secret",
@@ -60,21 +71,27 @@ func TestParseDotenvErrorsHideTheLine(t *testing.T) {
 
 func TestLoadDotenvKeepsExistingVars(t *testing.T) {
 	path := filepath.Join(t.TempDir(), ".env")
-	if err := os.WriteFile(path, []byte("NELLIE_TEST_SET=from-file\nNELLIE_TEST_UNSET=from-file\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("DATABASE_URL=postgres://from-file/postgres\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("NELLIE_TEST_SET", "from-shell")
-	t.Setenv("NELLIE_TEST_UNSET", "") // registers cleanup for the next line
-	os.Unsetenv("NELLIE_TEST_UNSET")
+	saved := fromDotenv
+	t.Cleanup(func() { fromDotenv = saved })
 
+	fromDotenv = map[string]bool{}
+	t.Setenv("DATABASE_URL", "postgres://from-shell/postgres")
 	if err := loadDotenv(path, io.Discard); err != nil {
 		t.Fatal(err)
 	}
-	if got := os.Getenv("NELLIE_TEST_SET"); got != "from-shell" {
-		t.Errorf("NELLIE_TEST_SET = %q, want the shell's value", got)
+	if got := os.Getenv("DATABASE_URL"); got != "postgres://from-shell/postgres" || fromDotenv["DATABASE_URL"] {
+		t.Errorf("DATABASE_URL = %q (from .env: %v), want the shell's value", got, fromDotenv["DATABASE_URL"])
 	}
-	if got := os.Getenv("NELLIE_TEST_UNSET"); got != "from-file" {
-		t.Errorf("NELLIE_TEST_UNSET = %q, want the file's value", got)
+
+	os.Unsetenv("DATABASE_URL") // t.Setenv above restores it afterwards
+	if err := loadDotenv(path, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if got := os.Getenv("DATABASE_URL"); got != "postgres://from-file/postgres" || !fromDotenv["DATABASE_URL"] {
+		t.Errorf("DATABASE_URL = %q (from .env: %v), want the file's value", got, fromDotenv["DATABASE_URL"])
 	}
 }
 
@@ -84,13 +101,14 @@ func TestLoadDotenvMissingFile(t *testing.T) {
 	}
 }
 
-// Value: protects=PG* connection settings and SSL trust settings are never taken from .env, so a checked-out .env can't redirect the admin connection; fails_when=PGHOST or SSL_CERT_FILE from the file gets set, or the warning doesn't name the key; why_new=the .env allow-list has no test; seam=none
-func TestLoadDotenvIgnoresConnectionKeys(t *testing.T) {
+// Value: protects=.env only ever sets DATABASE_URL, so a checked-out .env can't redirect the admin connection or change Go's TLS and DNS behavior; fails_when=PGHOST, SSL_CERT_FILE, GODEBUG or any other key from the file gets set, or the warning doesn't name it; why_new=adversarial review: GODEBUG and resolver keys got through the old block list; seam=none
+func TestLoadDotenvOnlySetsDatabaseURL(t *testing.T) {
 	path := filepath.Join(t.TempDir(), ".env")
-	if err := os.WriteFile(path, []byte("PGHOST=attacker.example\nSSL_CERT_FILE=/tmp/evil.pem\nNELLIE_TEST_ALLOWED=ok\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("PGHOST=attacker.example\nSSL_CERT_FILE=/tmp/evil.pem\nGODEBUG=tlsrsakex=1\nNELLIE_TEST_OTHER=x\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	for _, k := range []string{"PGHOST", "SSL_CERT_FILE", "NELLIE_TEST_ALLOWED"} {
+	ignored := []string{"PGHOST", "SSL_CERT_FILE", "GODEBUG", "NELLIE_TEST_OTHER"}
+	for _, k := range ignored {
 		t.Setenv(k, "")
 		os.Unsetenv(k)
 	}
@@ -99,16 +117,10 @@ func TestLoadDotenvIgnoresConnectionKeys(t *testing.T) {
 	if err := loadDotenv(path, &warn); err != nil {
 		t.Fatal(err)
 	}
-	if _, set := os.LookupEnv("PGHOST"); set {
-		t.Error("PGHOST was set from .env")
-	}
-	if _, set := os.LookupEnv("SSL_CERT_FILE"); set {
-		t.Error("SSL_CERT_FILE was set from .env")
-	}
-	if os.Getenv("NELLIE_TEST_ALLOWED") != "ok" {
-		t.Error("an ordinary key from .env should still be loaded")
-	}
-	for _, k := range []string{"PGHOST", "SSL_CERT_FILE"} {
+	for _, k := range ignored {
+		if _, set := os.LookupEnv(k); set {
+			t.Errorf("%s was set from .env", k)
+		}
 		if !strings.Contains(warn.String(), k) {
 			t.Errorf("no warning naming %s:\n%s", k, warn.String())
 		}

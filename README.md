@@ -86,18 +86,24 @@ cp .env.example .env
 DATABASE_URL=postgres://nellie_admin:something-long@localhost:5432/postgres
 ```
 
-Anything already set in your shell wins over `.env`, so a one-off
-`DATABASE_URL=... nellie add-project` still works. `PG*` and `SSL_CERT_*`
-variables are ignored in `.env`, with a warning, so a checked-out `.env` can't
-point nellie at another server. Set those in your shell.
+A `DATABASE_URL` already set in your shell wins over `.env`, so a one-off
+`DATABASE_URL=... nellie add-project` still works. nellie reads nothing else
+from `.env`: other variables (`PG*`, `SSL_CERT_*`, `GODEBUG`, ...) are ignored
+with a warning, so a checked-out `.env` can't point nellie at another server
+or change how it checks TLS. Set those in your shell.
 
-A `DATABASE_URL` from `.env` must contain its own password. Otherwise pgx
-would fill one in from `PGPASSWORD`, `~/.pgpass` or a service file and send it
-to whatever host the URL names, and a checked-out `.env` can name any host.
-For the same reason it may only set `host`, `port`, `user`, `password`,
-`dbname`, `sslmode` and `connect_timeout`, not a passfile, service or key
-file of its own. A `DATABASE_URL` you set in your shell has none of these
-limits.
+A `.env` file comes with whatever repo you cloned, so its `DATABASE_URL` is
+held to a few more rules, and nellie names the host it connects to:
+
+- It must contain its own password. Otherwise pgx would fill one in from
+  `PGPASSWORD`, `~/.pgpass` or a service file and send it to whatever host
+  the URL names.
+- It may only set `host`, `port`, `user`, `password`, `dbname`, `sslmode`
+  and `connect_timeout`, not a passfile, service or key file of its own.
+- It can't sit next to `PG*` connection settings in your shell (`PGHOST`,
+  `PGUSER`, `PGPASSWORD`, ...): nellie won't guess which server you mean.
+
+A `DATABASE_URL` you set in your shell has none of these limits.
 
 ### TLS
 
@@ -222,7 +228,10 @@ The old password stops working at once; sessions that are already connected
 stay connected. Postgres has one password per role, so there's no overlap
 window: update the app's config right after.
 
-nellie won't touch roles that can't log in, superusers, the admin role it's
+nellie only rotates roles that `nellie list` shows: project owners and the
+users of the admin's projects. On Postgres 15 the admin could otherwise
+change any ordinary role's password on the server. Within those, it won't
+touch roles that can't log in, superusers, the admin role it's
 connected as, or roles with powers nellie never gives its own roles
 (`CREATEROLE`, `REPLICATION`, `BYPASSRLS`, such as another admin), directly
 or through membership in another role, and members of any predefined `pg_*`

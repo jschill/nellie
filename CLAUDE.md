@@ -64,7 +64,9 @@ as one non-empty line, unconfirmed (that's the secrets-manager path, so
 there's no `--password-stdin`); an empty piped line is an error, not
 "generate". With piped input the input is only the password: the
 user must be the argument and the admin connection must come from the
-environment, else exit 2. It refuses roles that don't exist, can't log in,
+environment, else exit 2. It refuses roles that `list` doesn't show (no
+project by `shownProject`; on Postgres 15 CREATEROLE could rotate anyone),
+roles that don't exist, can't log in,
 are superusers, are the admin itself, have `CREATEROLE`, `REPLICATION` or
 `BYPASSRLS`, or are members of a role that has, or of any predefined `pg_*`
 role except `pg_database_owner` (`list` shows those as `privileged`); it warns when the role's `VALID UNTIL` has passed. Piped input must
@@ -110,8 +112,9 @@ bind parameters) after `pinSession` and the version check; `--dry-run` prints
 the pin and the query (`pg.ListScript`).
 
 `pinSession` (sql.go) starts the admin connection of every command: it pins
-`search_path` and refuses a session acting as another role unless the
-admin's own `ALTER ROLE ... SET role` explains it. It
+`search_path`, refuses a `NOINHERIT` admin (which can't use the owners'
+privileges, so `list` would be empty), and refuses a session acting as
+another role unless the admin's own `ALTER ROLE ... SET role` explains it. It
 fails closed on purpose: checking the database's `role` setting instead races
 with its owner clearing it. That setting only picks the error's advice
 (`ALTER DATABASE` vs a role in the connection settings).
@@ -152,9 +155,12 @@ Run all of these before calling a change done.
   `~/.pgpass` works via pgx in every case.
 - `cli.Run` loads `.env` from the current directory first (own small parser
   in `internal/cli/dotenv.go`, no dependency). Variables already set in the
-  environment win. `PG*` and `SSL_CERT_*` keys are skipped with a warning,
-  so a checked-out `.env` can't redirect the admin connection; all other keys
-  load. A `DATABASE_URL` from `.env` (`fromDotenv`) must carry its own
+  environment win. Only `DATABASE_URL` loads; every other key (`PG*`,
+  `SSL_CERT_*`, `GODEBUG`, ...) is skipped with a warning, so a checked-out
+  `.env` can't redirect the admin connection or change Go's TLS and DNS
+  behavior. A byte order mark is stripped. A `DATABASE_URL` from `.env`
+  (`fromDotenv`) is refused next to `PG*` connection settings from the shell
+  (`hasPGEnv`), its host is printed to stderr, and it must carry its own
   password, so `requireOwnPassword` hides pgx's PGPASSWORD, passfile and service
   fallbacks while parsing it, and allows only the keys in `dotenvURLKeys`
   (pgx's `ConnStringAllowedKeys`), so the URL can't name a passfile, service
@@ -249,7 +255,9 @@ These are non-negotiable — the tool creates roles and sets passwords.
 
 ## Output and exit codes
 
-- Human output to stdout, errors to stderr.
+- Human output to stdout, errors to stderr. `fail` escapes control
+  characters in error text (`terminalSafe`), since some of it comes from the
+  server.
 - `--json` output is stable and pun-free.
 - Exit codes: `0` success, `1` runtime/database error, `2` usage error,
   `130` interrupted by Ctrl-C (128 + SIGINT, from either kind of prompt).
