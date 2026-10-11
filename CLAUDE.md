@@ -75,8 +75,9 @@ that database is one of the admin's projects, owned by the role named after
 it, and the role can connect to it (`canConnectExpr`, shared with `list`).
 Never a shorter one: picking by CONNECT let database owners redirect the URL,
 and the owner rule stops a CREATEDB role's look-alike database. It warns,
-like `list`, about powers beyond the project (`rolePowers`, computed against
-the name-picked home) and template home databases.
+like `list`, about powers beyond the project and template projects, both
+computed against the project `list` shows the role under (`shownProject`;
+the project predicate is `isProjectExpr`, shared with `list`).
 
 `list` shows the databases whose owner's privileges the admin has
 (`pg_has_role(datdba, 'USAGE')`, as in `add-user`; not `'MEMBER'`, which on
@@ -108,8 +109,9 @@ and so drop out of `list`; that's documented, not handled. It runs `pg.ListSQL` 
 bind parameters) after `pinSession` and the version check; `--dry-run` prints
 the pin and the query (`pg.ListScript`).
 
-`pinSession` (sql.go) starts the admin connection of every command: it pins `search_path` and refuses a session acting as
-another role unless the admin's own `ALTER ROLE ... SET role` explains it. It
+`pinSession` (sql.go) starts the admin connection of every command: it pins
+`search_path` and refuses a session acting as another role unless the
+admin's own `ALTER ROLE ... SET role` explains it. It
 fails closed on purpose: checking the database's `role` setting instead races
 with its owner clearing it. That setting only picks the error's advice
 (`ALTER DATABASE` vs a role in the connection settings).
@@ -154,7 +156,9 @@ Run all of these before calling a change done.
   so a checked-out `.env` can't redirect the admin connection; all other keys
   load. A `DATABASE_URL` from `.env` (`fromDotenv`) must carry its own
   password, so `requireOwnPassword` hides pgx's PGPASSWORD, passfile and service
-  fallbacks while parsing it. `.env` is gitignored; `.env.example` shows the format.
+  fallbacks while parsing it, and allows only the keys in `dotenvURLKeys`
+  (pgx's `ConnStringAllowedKeys`), so the URL can't name a passfile, service
+  or key file itself. `.env` is gitignored; `.env.example` shows the format.
 - All prompts in a command share one `prompter` (`internal/cli/prompt.go`):
   `bufio.Scanner` reads ahead, so a second scanner on stdin can lose input.
   Prompts go to stderr, so stdout stays clean.
@@ -207,7 +211,10 @@ more restricted users are added separately.
   when it would take over a login role (not the admin) named `<p>_…` that no
   longer database already claims, and `add-user` refuses a name that a
   database longer than its project would claim. Databases and `NOLOGIN` roles
-  don't block a project name. Errors quote catalog names (`%q`). Names that overlap
+  don't block a project name. Errors quote catalog names (`%q`). Residual
+  risk, documented: the guard trusts longer databases to stay, but the owner
+  of `<p>_x` can drop it later, and its `<p>_x_*` roles then show under `<p>`
+  as plain users. Names that overlap
   from before stay possible; `list` and `rotate-password` assign them by name
   and only give a URL for a database owned by the role named after it.
 

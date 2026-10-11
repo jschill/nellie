@@ -51,9 +51,8 @@ import (
 const ListSQL = `WITH projects AS (
 	SELECT oid, datname, datdba, datistemplate,
 		pg_get_userbyid(datdba) <> datname AS foreign_owner
-	FROM pg_database
-	WHERE datconnlimit <> -2 AND datname NOT IN ('template0', 'template1')
-		AND pg_has_role(datdba, 'USAGE')
+	FROM pg_database d
+	WHERE ` + isProjectExpr + `
 ), homes AS (
 	SELECT DISTINCT ON (r.rolname) r.oid AS role, r.rolname,
 		d.oid AS home, d.datname AS home_name
@@ -89,6 +88,13 @@ LEFT JOIN users u ON u.project = p.oid
 LEFT JOIN pg_roles r ON r.oid = u.role
 LEFT JOIN powers up ON up.project = u.project AND up.role = u.role
 ORDER BY p.datname, u.rolname`
+
+// isProjectExpr is whether database d is one of the admin's projects: the
+// admin has its owner's privileges, and it's neither Postgres's own template0
+// or template1 nor invalid (datconnlimit -2, left by an interrupted DROP
+// DATABASE). Shared with rotate-password, so both pick the same projects.
+const isProjectExpr = `d.datconnlimit <> -2 AND d.datname NOT IN ('template0', 'template1')
+	AND pg_has_role(d.datdba, 'USAGE')`
 
 // canConnectExpr is whether role r may connect to database d: the database
 // allows connections (datallowconn), and, except for superusers, neither the

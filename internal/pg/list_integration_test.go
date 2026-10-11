@@ -521,7 +521,7 @@ func TestListProjectsFlagsPrivilegedRoles(t *testing.T) {
 func TestPinSessionRefusesDatabaseRole(t *testing.T) {
 	ctx := context.Background()
 	cfg := adminConfig(t)
-	p, _, _ := newTestProject(t, cfg)
+	p, _, dropUsers := newTestProject(t, cfg)
 
 	admin, err := pgx.ConnectConfig(ctx, cfg)
 	if err != nil {
@@ -552,6 +552,14 @@ func TestPinSessionRefusesDatabaseRole(t *testing.T) {
 		if err == nil {
 			dropProject(context.Background(), cfg, q, true)
 		}
+	}
+	u, err := NewUser(AppUser, p.Name+"_pinned", p.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	*dropUsers = append(*dropUsers, u.Name)
+	if err := AddUser(ctx, inProject, u, NewPassword()); err == nil || !strings.Contains(err.Error(), "acts as role") {
+		t.Errorf("AddUser: got %v, want the same refusal", err)
 	}
 }
 

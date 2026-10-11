@@ -63,10 +63,7 @@ func CreateProject(ctx context.Context, cfg *pgx.ConnConfig, p Project, password
 
 	// The name checks read catalogs and use operators (||, =, >) by
 	// unqualified name: pin search_path and refuse a switched role first, as
-	// list and rotate-password do. AddUser's second connection, to the
-	// project database, isn't pinned: its GRANT and ALTER DEFAULT PRIVILEGES
-	// statements evaluate nothing search_path could change, and a role switch
-	// there makes ALTER DEFAULT PRIVILEGES FOR ROLE <owner> fail anyway.
+	// every command does.
 	if err := pinSession(ctx, admin); err != nil {
 		return err
 	}

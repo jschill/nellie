@@ -468,31 +468,60 @@ func TestDryRunIsMarkedNotRunnable(t *testing.T) {
 	}
 }
 
-// Value: protects=a DATABASE_URL from .env never gets the admin password filled in from PGPASSWORD or a passfile; fails_when=requireOwnPassword is dropped or fromDotenv isn't set; why_new=red team: a checked-out .env could send the exported admin password to its own host; seam=none
+// Value: protects=a DATABASE_URL from .env never gets the admin password filled in from PGPASSWORD, a passfile or a service file, whether the environment or the URL itself names them; fails_when=requireOwnPassword is dropped, fromDotenv isn't set, or the key allow-list goes; why_new=red team: a checked-out .env could send the user's password to its own host; seam=none
 func TestDotenvURLNeedsItsOwnPassword(t *testing.T) {
 	saved := fromDotenv
 	t.Cleanup(func() { fromDotenv = saved })
 	p := newPrompter(strings.NewReader(""), &bytes.Buffer{}) // any read would fail
 
+	// Files a URL could point pgx at, each holding a password.
+	dir := t.TempDir()
+	passfile := filepath.Join(dir, "pgpass")
+	servicefile := filepath.Join(dir, "pg_service.conf")
+	if err := os.WriteFile(passfile, []byte("*:*:*:*:filepw\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(servicefile, []byte("[prod]\npassword=filepw\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
 	// Built with net/url, like TestListConnectionFailure, so no literal
 	// URL with credentials sits in the source.
-	dbURL := func(user *url.Userinfo) string {
-		return (&url.URL{Scheme: "postgres", User: user, Host: "other.example", Path: "/postgres"}).String()
+	dbURL := func(user *url.Userinfo, query url.Values) string {
+		u := url.URL{Scheme: "postgres", User: user, Host: "other.example", Path: "/postgres", RawQuery: query.Encode()}
+		return u.String()
 	}
+	const noPassword, otherKey = "no password of its own", "sets something other than"
 	tests := []struct {
 		name     string
 		url      string
-		exported bool // set in the shell rather than in .env
-		wantErr  bool
+		env      map[string]string
+		exported bool   // set in the shell rather than in .env
+		wantErr  string // "" for none
+		wantPW   string
 	}{
-		{name: "no password in .env", url: dbURL(url.User("admin")), wantErr: true},
-		{name: "password in .env", url: dbURL(url.UserPassword("admin", "own"))},
-		{name: "no password, exported", url: dbURL(url.User("admin")), exported: true},
+		{name: "no password in .env", url: dbURL(url.User("admin"), nil), wantErr: noPassword},
+		{name: "password in .env", url: dbURL(url.UserPassword("admin", "own"), nil), wantPW: "own"},
+		{name: "passfile from the environment", url: dbURL(url.User("admin"), nil),
+			env: map[string]string{"PGPASSFILE": passfile}, wantErr: noPassword},
+		{name: "service from the environment", url: dbURL(url.User("admin"), nil),
+			env: map[string]string{"PGSERVICEFILE": servicefile, "PGSERVICE": "prod"}, wantErr: noPassword},
+		{name: "passfile in the URL", url: dbURL(url.User("admin"), url.Values{"passfile": {passfile}}), wantErr: otherKey},
+		{name: "service in the URL", url: dbURL(url.User("admin"), url.Values{"service": {"prod"}, "servicefile": {servicefile}}),
+			wantErr: otherKey},
+		{name: "service in keyword form", url: "host=other.example user=admin service=prod servicefile=" + servicefile,
+			wantErr: otherKey},
+		{name: "no password, exported", url: dbURL(url.User("admin"), nil), exported: true, wantPW: "admin-secret"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			clearConnEnv(t)
 			t.Setenv("PGPASSWORD", "admin-secret")
+			t.Setenv("PGPASSFILE", os.DevNull)
+			t.Setenv("PGSERVICEFILE", os.DevNull)
+			for k, v := range tt.env {
+				t.Setenv(k, v)
+			}
 			fromDotenv = map[string]bool{}
 			if tt.exported {
 				t.Setenv("DATABASE_URL", tt.url)
@@ -508,23 +537,20 @@ func TestDotenvURLNeedsItsOwnPassword(t *testing.T) {
 			}
 
 			cfg, err := connConfig(p)
-			if tt.wantErr {
-				if err == nil || !strings.Contains(err.Error(), "no password of its own") {
-					t.Fatalf("connConfig = %v, want a refusal", err)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("connConfig = %v, want an error containing %q", err, tt.wantErr)
 				}
-				if strings.Contains(err.Error(), "admin-secret") {
-					t.Errorf("error leaks the password: %v", err)
+				if strings.Contains(err.Error(), "admin-secret") || strings.Contains(err.Error(), "filepw") {
+					t.Errorf("error leaks a password: %v", err)
 				}
 				return
 			}
 			if err != nil {
 				t.Fatal(err)
 			}
-			if tt.exported && cfg.Password != "admin-secret" {
-				t.Errorf("password = %q, want PGPASSWORD for an exported URL", cfg.Password)
-			}
-			if !tt.exported && cfg.Password != "own" {
-				t.Errorf("password = %q, want the URL's own", cfg.Password)
+			if cfg.Password != tt.wantPW {
+				t.Errorf("password = %q, want %q", cfg.Password, tt.wantPW)
 			}
 			if got := os.Getenv("PGPASSWORD"); got != "admin-secret" {
 				t.Errorf("PGPASSWORD = %q after connConfig, want it restored", got)

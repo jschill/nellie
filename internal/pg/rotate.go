@@ -171,8 +171,7 @@ func checkRotatable(ctx context.Context, conn *pgx.Conn, role string) (expired b
 func projectHome(ctx context.Context, conn *pgx.Conn, role string) (home string, usable bool, err error) {
 	err = conn.QueryRow(ctx, `
 		SELECT d.datname,
-			d.datname NOT IN ('template0', 'template1') AND d.datconnlimit <> -2 -- -2 marks an invalid database
-				AND pg_has_role(d.datdba, 'USAGE') AND pg_get_userbyid(d.datdba) = d.datname
+			`+isProjectExpr+` AND pg_get_userbyid(d.datdba) = d.datname
 				AND `+canConnectExpr+`
 		FROM pg_database d, pg_roles r
 		WHERE d.datname = ANY($1::text[]) AND r.rolname = $2
@@ -190,9 +189,8 @@ func projectHome(ctx context.Context, conn *pgx.Conn, role string) (home string,
 // the admin's projects, or "" for none, and whether it's a template database.
 func shownProject(ctx context.Context, conn *pgx.Conn, role string) (project string, template bool, err error) {
 	err = conn.QueryRow(ctx, `
-		SELECT datname, datistemplate FROM pg_database
-		WHERE datname = ANY($1::text[]) AND datconnlimit <> -2
-			AND datname NOT IN ('template0', 'template1') AND pg_has_role(datdba, 'USAGE')
+		SELECT datname, datistemplate FROM pg_database d
+		WHERE datname = ANY($1::text[]) AND `+isProjectExpr+`
 		ORDER BY length(datname) DESC LIMIT 1`,
 		projectCandidates(role),
 	).Scan(&project, &template)

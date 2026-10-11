@@ -196,7 +196,7 @@ func TestRotatePasswordCommand(t *testing.T) {
 		}
 	})
 
-	// Value: protects=a template project database is warned about on stderr and flagged in --json; fails_when=shownProject stops reporting datistemplate, or the warning or field is dropped; why_new=Rotation.Template was only ever false in tests; seam=none
+	// Value: protects=a template project database is warned about on stderr and flagged in --json; fails_when=the template flag stops reaching Rotation, or the warning or field is dropped; no_claim=the role's home and shown project are the same database here; why_new=Rotation.Template was only ever false in tests; seam=none
 	t.Run("template home warns on stderr", func(t *testing.T) {
 		// What the project's owner could do; the admin acts for the owner.
 		exec("ALTER DATABASE " + pgx.Identifier{project}.Sanitize() + " IS_TEMPLATE true")

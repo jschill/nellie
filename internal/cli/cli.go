@@ -139,11 +139,18 @@ func connConfig(p *prompter) (*pgx.ConnConfig, error) {
 	}
 }
 
+// dotenvURLKeys are the only settings a DATABASE_URL from .env may contain.
+// Anything else could make pgx read a file the URL names (passfile, service,
+// servicefile, sslkey, ...) and send what it finds to the URL's host.
+var dotenvURLKeys = []string{"host", "port", "user", "password", "dbname", "sslmode", "connect_timeout"}
+
 // requireOwnPassword refuses a connection string without a password of its
 // own. It's for a DATABASE_URL from .env, which a checked-out repo controls:
 // pgx would fill a missing password in from PGPASSWORD, a passfile or a
 // service file, and send the admin password to whatever host the URL names.
-// pgx reads those from the environment, so they're hidden while it parses.
+// The environment's versions are hidden while pgx parses, and
+// ConnStringAllowedKeys rejects the URL's own (passfile=, service=, ...)
+// before pgx reads any file.
 func requireOwnPassword(dsn string) error {
 	hidden := map[string]string{"PGPASSWORD": "", "PGPASSFILE": os.DevNull, "PGSERVICE": "", "PGSERVICEFILE": os.DevNull}
 	for key, value := range hidden {
@@ -157,9 +164,13 @@ func requireOwnPassword(dsn string) error {
 			}
 		}()
 	}
-	cfg, err := pgx.ParseConfig(dsn)
+	cfg, err := pgx.ParseConfigWithOptions(dsn, pgx.ParseConfigOptions{
+		ParseConfigOptions: pgconn.ParseConfigOptions{ConnStringAllowedKeys: dotenvURLKeys},
+	})
 	if err != nil {
-		return errBadURL
+		// pgx's message can echo the URL, so it's not shown (see errBadURL).
+		return fmt.Errorf("the DATABASE_URL in .env isn't valid, or sets something other than %s; "+
+			"set it in your shell instead if it needs more", strings.Join(dotenvURLKeys, ", "))
 	}
 	if cfg.Password == "" {
 		return errors.New("the DATABASE_URL in .env has no password of its own, and nellie won't fill one in from " +

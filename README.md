@@ -94,7 +94,10 @@ point nellie at another server. Set those in your shell.
 A `DATABASE_URL` from `.env` must contain its own password. Otherwise pgx
 would fill one in from `PGPASSWORD`, `~/.pgpass` or a service file and send it
 to whatever host the URL names, and a checked-out `.env` can name any host.
-A `DATABASE_URL` you set in your shell can leave the password to those.
+For the same reason it may only set `host`, `port`, `user`, `password`,
+`dbname`, `sslmode` and `connect_timeout`, not a passfile, service or key
+file of its own. A `DATABASE_URL` you set in your shell has none of these
+limits.
 
 ### TLS
 
@@ -140,7 +143,8 @@ login roles is refused too: with a role `shop_v2_app` on the server, there's no
 project `shop_v2`. Otherwise that role would suddenly look like `shop_v2`'s
 user. A role that a longer project name already covers stays where it is
 (`shop_v2_app` with a database `shop_v2` doesn't stop a project `shop`), and
-databases and roles that can't log in don't count.
+databases and roles that can't log in don't count. If `shop_v2`'s owner later
+drops that database, its users show up under `shop` instead.
 
 ### `nellie add-user`
 

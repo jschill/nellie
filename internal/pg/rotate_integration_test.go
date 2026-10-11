@@ -516,3 +516,49 @@ func TestRotatePasswordRefusesPredefinedRoleMembers(t *testing.T) {
 		t.Errorf("got %v, want a refusal naming pg_monitor", err)
 	}
 }
+
+// Value: protects=the add-project guard ignores the admin's own role, so an admin nellie_admin can still create a project nellie; fails_when=the rolname NOT IN (current_user, session_user) exclusion goes; why_new=run 4 review: the guard refused add-project for the admin's own prefix; seam=none
+func TestProjectNameIgnoresTheAdmin(t *testing.T) {
+	ctx := context.Background()
+	cfg := adminConfig(t)
+	admin, err := pgx.ConnectConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { admin.Close(context.Background()) })
+
+	// A second admin-like login role q_adm, which the guard should skip
+	// while it's the one connected, and count when it isn't.
+	q := "nellie_it_" + strings.ToLower(NewPassword()[:8])
+	role, password := q+"_adm", NewPassword()
+	verifier, err := scramVerifier(password)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustExec(t, admin, "CREATE ROLE "+ident(role)+" LOGIN PASSWORD "+literal(verifier))
+	t.Cleanup(func() {
+		if _, err := admin.Exec(context.Background(), "DROP ROLE IF EXISTS "+ident(role)); err != nil {
+			t.Errorf("dropping %s: %v", role, err)
+		}
+	})
+
+	asRole := cfg.Copy()
+	asRole.User, asRole.Password = role, password
+	conn, err := pgx.ConnectConfig(ctx, asRole)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { conn.Close(context.Background()) })
+	if err := pinSession(ctx, conn); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkProjectNameUnambiguous(ctx, conn, q); err != nil {
+		t.Errorf("as %s, project %s: %v, want it allowed: the admin itself never moves", role, q, err)
+	}
+	if err := pinSession(ctx, admin); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkProjectNameUnambiguous(ctx, admin, q); !errors.Is(err, ErrAmbiguous) {
+		t.Errorf("as %s, project %s: %v, want ErrAmbiguous for %s", cfg.User, q, err, role)
+	}
+}
