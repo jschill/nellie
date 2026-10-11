@@ -96,12 +96,18 @@ A `.env` file comes with whatever repo you cloned, so its `DATABASE_URL` is
 held to a few more rules, and nellie names the host it connects to:
 
 - It must contain its own password. Otherwise pgx would fill one in from
-  `PGPASSWORD`, `~/.pgpass` or a service file and send it to whatever host
-  the URL names.
+  `~/.pgpass` or a service file and send it to whatever host the URL names.
 - It may only set `host`, `port`, `user`, `password`, `dbname`, `sslmode`
   and `connect_timeout`, not a passfile, service or key file of its own.
-- It can't sit next to `PG*` connection settings in your shell (`PGHOST`,
-  `PGUSER`, `PGPASSWORD`, ...): nellie won't guess which server you mean.
+- It names a single host, the one nellie shows you.
+- No `PG*` variable may be set in your shell (`PGHOST`, `PGPASSWORD`,
+  `PGSSLCERT`, `PGSSLMODE`, ...): pgx would use them for the server the
+  `.env` names.
+- A client certificate in `~/.postgresql`, which pgx sends by default,
+  makes nellie refuse it too.
+
+Such a `.env` can still pick the server nellie connects to, which is why
+nellie prints it: check it before you rotate a password.
 
 A `DATABASE_URL` you set in your shell has none of these limits.
 

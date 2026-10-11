@@ -112,9 +112,11 @@ bind parameters) after `pinSession` and the version check; `--dry-run` prints
 the pin and the query (`pg.ListScript`).
 
 `pinSession` (sql.go) starts the admin connection of every command: it pins
-`search_path`, refuses a `NOINHERIT` admin (which can't use the owners'
-privileges, so `list` would be empty), and refuses a session acting as
-another role unless the admin's own `ALTER ROLE ... SET role` explains it. It
+`search_path` and refuses a session acting as another role unless the
+admin's own `ALTER ROLE ... SET role` explains it. (No role-level NOINHERIT
+check: on Postgres 16+ each grant has its own INHERIT option, so
+`projectOwner` explains it per database instead, using `SET` on 16+ and
+`MEMBER` on 15.) It
 fails closed on purpose: checking the database's `role` setting instead races
 with its owner clearing it. That setting only picks the error's advice
 (`ALTER DATABASE` vs a role in the connection settings).
@@ -159,12 +161,14 @@ Run all of these before calling a change done.
   `SSL_CERT_*`, `GODEBUG`, ...) is skipped with a warning, so a checked-out
   `.env` can't redirect the admin connection or change Go's TLS and DNS
   behavior. A byte order mark is stripped. A `DATABASE_URL` from `.env`
-  (`fromDotenv`) is refused next to `PG*` connection settings from the shell
-  (`hasPGEnv`), its host is printed to stderr, and it must carry its own
-  password, so `requireOwnPassword` hides pgx's PGPASSWORD, passfile and service
-  fallbacks while parsing it, and allows only the keys in `dotenvURLKeys`
-  (pgx's `ConnStringAllowedKeys`), so the URL can't name a passfile, service
-  or key file itself. `.env` is gitignored; `.env.example` shows the format.
+  (`fromDotenv`, handled by `dotenvConfig`) is refused when any `PG*`
+  variable is set (`pgEnvNames`: pgx reads PGSSLCERT, PGSSLMODE, ... too),
+  when it names more than one host, or when pgx picked up a default client
+  certificate from `~/.postgresql`; its host is printed to stderr. It must
+  carry its own password: `requireOwnPassword` hides pgx's default passfile
+  and service file while parsing it, and allows only the keys in
+  `dotenvURLKeys` (pgx's `ConnStringAllowedKeys`), so the URL can't name a
+  passfile, service or key file itself. `.env` is gitignored; `.env.example` shows the format.
 - All prompts in a command share one `prompter` (`internal/cli/prompt.go`):
   `bufio.Scanner` reads ahead, so a second scanner on stdin can lose input.
   Prompts go to stderr, so stdout stays clean.

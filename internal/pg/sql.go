@@ -51,10 +51,9 @@ func pinSession(ctx context.Context, conn *pgx.Conn) error {
 		return fmt.Errorf("setting search_path: %w", err)
 	}
 	var db, current, session string
-	var switched, byDatabase, inherits bool
+	var switched, byDatabase bool
 	err := conn.QueryRow(ctx, `
 		SELECT current_database(), current_user, session_user,
-			(SELECT rolinherit OR rolsuper FROM pg_roles WHERE rolname = current_user),
 			current_user <> session_user AND NOT EXISTS (
 				SELECT FROM pg_db_role_setting s
 				WHERE s.setrole = (SELECT oid FROM pg_roles WHERE rolname = session_user)
@@ -65,7 +64,7 @@ func pinSession(ctx context.Context, conn *pgx.Conn) error {
 				WHERE s.setrole = 0
 					AND s.setdatabase = (SELECT oid FROM pg_database WHERE datname = current_database())
 					AND EXISTS (SELECT FROM unnest(s.setconfig) c WHERE starts_with(c, 'role=')))`,
-	).Scan(&db, &current, &session, &inherits, &switched, &byDatabase)
+	).Scan(&db, &current, &session, &switched, &byDatabase)
 	if err != nil {
 		return fmt.Errorf("checking the session's role: %w", err)
 	}
@@ -80,12 +79,6 @@ func pinSession(ctx context.Context, conn *pgx.Conn) error {
 		// the role, so they're quoted rather than sent to the terminal raw.
 		return fmt.Errorf("the session acts as role %q instead of %q, and the admin's own role settings don't explain it; "+
 			"the likely cause is %s", current, session, cause)
-	}
-	if !inherits {
-		// pg_has_role(..., 'USAGE') is false for every owner then, so list
-		// would show nothing and add-user would blame the memberships.
-		return fmt.Errorf("the admin role %q has NOINHERIT, so it can't use the privileges of the project owners it's a member of; "+
-			"run ALTER ROLE %s INHERIT", current, pgx.Identifier{current}.Sanitize())
 	}
 	return nil
 }

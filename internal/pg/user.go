@@ -174,16 +174,28 @@ func AddUser(ctx context.Context, cfg *pgx.ConnConfig, u User, password string) 
 // admin role can act as it, which the grants in AddUser need.
 func projectOwner(ctx context.Context, conn *pgx.Conn, db string) (string, error) {
 	var owner string
-	var canAct bool
-	err := conn.QueryRow(ctx,
-		"SELECT pg_get_userbyid(datdba), pg_has_role(datdba, 'USAGE') FROM pg_database WHERE datname = $1",
+	var canAct, member bool
+	// "Member" here means one that could SET ROLE to the owner. On Postgres
+	// 16+ that's the SET privilege: MEMBER also matches the ADMIN-only
+	// membership a CREATEROLE admin keeps in every role it created, and 'SET'
+	// isn't known to Postgres 15, where MEMBER is right.
+	err := conn.QueryRow(ctx, `
+		SELECT pg_get_userbyid(datdba), pg_has_role(datdba, 'USAGE'),
+			pg_has_role(datdba, CASE WHEN current_setting('server_version_num')::int >= 160000 THEN 'SET' ELSE 'MEMBER' END)
+		FROM pg_database WHERE datname = $1`,
 		db,
-	).Scan(&owner, &canAct)
+	).Scan(&owner, &canAct, &member)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", fmt.Errorf("database %s %w", db, ErrNotFound)
 	}
 	if err != nil {
 		return "", fmt.Errorf("looking up database %s: %w", db, err)
+	}
+	if !canAct && member {
+		// A NOINHERIT admin, or on Postgres 16+ a grant WITH INHERIT FALSE:
+		// nellie list leaves these databases out for the same reason.
+		return "", fmt.Errorf("can't grant access to database %q: the admin role is a member of its owner %q but doesn't "+
+			"inherit its privileges (NOINHERIT, or a grant WITH INHERIT FALSE); grant the membership WITH INHERIT TRUE", db, owner)
 	}
 	if !canAct {
 		return "", fmt.Errorf("can't grant access to database %s: the admin role isn't a member of its owner %q "+

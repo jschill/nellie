@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode"
@@ -121,20 +122,7 @@ func connConfig(p *prompter) (*pgx.ConnConfig, error) {
 		if dsn == "" || !fromDotenv["DATABASE_URL"] {
 			return parseAdmin(dsn)
 		}
-		// From .env: a checked-out repo may have chosen this server.
-		if hasPGEnv() {
-			return nil, errors.New("DATABASE_URL comes from .env, but PG* connection settings are set in your shell, " +
-				"and nellie won't guess which server you mean; unset one of them")
-		}
-		if err := requireOwnPassword(dsn); err != nil {
-			return nil, err
-		}
-		cfg, err := parseAdmin(dsn)
-		if err != nil {
-			return nil, err
-		}
-		fmt.Fprintf(p.out, "nellie: using DATABASE_URL from .env (host %s)\n", printable(cfg.Host))
-		return cfg, nil
+		return dotenvConfig(p, dsn)
 	}
 
 	for {
@@ -152,6 +140,56 @@ func connConfig(p *prompter) (*pgx.ConnConfig, error) {
 	}
 }
 
+// dotenvConfig resolves a DATABASE_URL from .env, which a checked-out repo
+// may have chosen. pgx would mix in every PG* variable from the shell (a
+// client certificate, sslmode, a password), so the two never combine; the URL
+// must carry its own password and name one host, and nellie says which.
+func dotenvConfig(p *prompter, dsn string) (*pgx.ConnConfig, error) {
+	if names := pgEnvNames(); len(names) > 0 {
+		verb := "is"
+		if len(names) > 1 {
+			verb = "are"
+		}
+		return nil, fmt.Errorf("DATABASE_URL comes from .env, but %s %s set in your shell, and pgx would use that "+
+			"for whatever server .env names; unset one of them", strings.Join(names, ", "), verb)
+	}
+	if err := requireOwnPassword(dsn); err != nil {
+		return nil, err
+	}
+	cfg, err := parseAdmin(dsn)
+	if err != nil {
+		return nil, err
+	}
+	targets := append([]*pgconn.FallbackConfig{{Host: cfg.Host, Port: cfg.Port, TLSConfig: cfg.TLSConfig}}, cfg.Fallbacks...)
+	for _, t := range targets {
+		if t.Host != cfg.Host || t.Port != cfg.Port {
+			return nil, errors.New("the DATABASE_URL in .env names more than one host; " +
+				"nellie only shows one, so give it a single host, or set DATABASE_URL in your shell")
+		}
+		// pgx loads ~/.postgresql/postgresql.crt and .key by default, and
+		// would present them to the server .env names.
+		if t.TLSConfig != nil && (len(t.TLSConfig.Certificates) > 0 || t.TLSConfig.GetClientCertificate != nil) {
+			return nil, errors.New("a client certificate from ~/.postgresql would be sent to the server the DATABASE_URL " +
+				"in .env names; set DATABASE_URL in your shell instead")
+		}
+	}
+	fmt.Fprintf(p.out, "nellie: using DATABASE_URL from .env (host %s, port %d)\n", printable(cfg.Host), cfg.Port)
+	return cfg, nil
+}
+
+// pgEnvNames returns the PG* variables set in the environment, sorted.
+func pgEnvNames() []string {
+	var names []string
+	for _, kv := range os.Environ() {
+		name, value, _ := strings.Cut(kv, "=")
+		if strings.HasPrefix(name, "PG") && value != "" {
+			names = append(names, name)
+		}
+	}
+	slices.Sort(names)
+	return names
+}
+
 // dotenvURLKeys are the only settings a DATABASE_URL from .env may contain.
 // Anything else could make pgx read a file the URL names (passfile, service,
 // servicefile, sslkey, ...) and send what it finds to the URL's host.
@@ -159,13 +197,14 @@ var dotenvURLKeys = []string{"host", "port", "user", "password", "dbname", "sslm
 
 // requireOwnPassword refuses a connection string without a password of its
 // own. It's for a DATABASE_URL from .env, which a checked-out repo controls:
-// pgx would fill a missing password in from PGPASSWORD, a passfile or a
-// service file, and send the admin password to whatever host the URL names.
-// The environment's versions are hidden while pgx parses, and
-// ConnStringAllowedKeys rejects the URL's own (passfile=, service=, ...)
-// before pgx reads any file.
+// pgx would fill a missing password in from a passfile or a service file and
+// send the admin password to whatever host the URL names. The default files
+// are hidden while pgx parses, and ConnStringAllowedKeys rejects the URL's
+// own (passfile=, service=, ...) before pgx reads any file.
 func requireOwnPassword(dsn string) error {
-	hidden := map[string]string{"PGPASSWORD": "", "PGPASSFILE": os.DevNull, "PGSERVICE": "", "PGSERVICEFILE": os.DevNull}
+	// No PG* variable is set (see dotenvConfig), but pgx still falls back
+	// to ~/.pgpass and ~/.pg_service.conf by default.
+	hidden := map[string]string{"PGPASSFILE": os.DevNull, "PGSERVICEFILE": os.DevNull}
 	for key, value := range hidden {
 		old, had := os.LookupEnv(key)
 		os.Setenv(key, value)
@@ -382,7 +421,8 @@ func terminalSafe(s string) string {
 		}
 		s = s[size:]
 	}
-	return b.String()
+	// A server could otherwise start a line that looks like nellie's own.
+	return strings.ReplaceAll(b.String(), "\n", "\n  ")
 }
 
 // connURL builds a connection string for a project role on the same server

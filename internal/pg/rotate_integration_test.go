@@ -590,27 +590,35 @@ func TestRotatePasswordRefusesRolesOutsideProjects(t *testing.T) {
 	}
 }
 
-// Value: protects=a NOINHERIT admin gets a clear error instead of an empty list and misleading add-user refusals; fails_when=pinSession's rolinherit check goes; why_new=adversarial review; seam=none
-func TestPinSessionRefusesNoInheritAdmin(t *testing.T) {
+// Value: protects=an admin that's a member of the owner without inheriting its privileges gets told why add-user can't grant, instead of "isn't a member"; fails_when=projectOwner stops telling MEMBER from USAGE; why_new=Codex: per-grant INHERIT on Postgres 16+ made a role-level NOINHERIT check wrong; seam=none
+func TestAddUserExplainsMissingInherit(t *testing.T) {
 	ctx := context.Background()
 	cfg := adminConfig(t)
+	p, _, dropUsers := newTestProject(t, cfg)
 	admin, err := pgx.ConnectConfig(ctx, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { admin.Close(context.Background()) })
 
-	role, password := "nellie_it_noinherit_"+strings.ToLower(NewPassword()[:8]), NewPassword()
+	// A second admin, NOINHERIT, so its membership in p's owner (granted
+	// with the role's default) doesn't carry the owner's privileges.
+	role, password := p.Name+"_noinh", NewPassword()
 	verifier, err := scramVerifier(password)
 	if err != nil {
 		t.Fatal(err)
 	}
-	mustExec(t, admin, "CREATE ROLE "+ident(role)+" LOGIN NOINHERIT CREATEROLE CREATEDB PASSWORD "+literal(verifier))
-	t.Cleanup(func() { admin.Exec(context.Background(), "DROP ROLE IF EXISTS "+ident(role)) })
+	*dropUsers = append(*dropUsers, role, p.Name+"_x")
+	mustExec(t, admin, "CREATE ROLE "+ident(role)+" LOGIN NOINHERIT CREATEROLE PASSWORD "+literal(verifier))
+	mustExec(t, admin, "GRANT "+ident(p.Name)+" TO "+ident(role))
 
 	asRole := cfg.Copy()
 	asRole.User, asRole.Password = role, password
-	if _, err := ListProjects(ctx, asRole); err == nil || !strings.Contains(err.Error(), "NOINHERIT") {
-		t.Errorf("ListProjects as a NOINHERIT admin: got %v, want a refusal naming NOINHERIT", err)
+	u, err := NewUser(AppUser, p.Name+"_x", p.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := AddUser(ctx, asRole, u, NewPassword()); err == nil || !strings.Contains(err.Error(), "doesn't inherit its privileges") {
+		t.Errorf("AddUser as a NOINHERIT member of the owner: got %v, want the inherit explanation", err)
 	}
 }

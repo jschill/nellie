@@ -3,15 +3,23 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -468,15 +476,15 @@ func TestDryRunIsMarkedNotRunnable(t *testing.T) {
 	}
 }
 
-// Value: protects=a DATABASE_URL from .env never gets the admin password filled in from PGPASSWORD, a passfile or a service file, whether the environment or the URL itself names them; fails_when=requireOwnPassword is dropped, fromDotenv isn't set, or the key allow-list goes; why_new=red team: a checked-out .env could send the user's password to its own host; seam=none
+// Value: protects=a DATABASE_URL from .env never gets a password, client certificate or other setting from the user's shell or home directory, and names exactly one host; fails_when=dotenvConfig's PG* refusal, single-host check, client-certificate check or requireOwnPassword's allow-list or passfile hiding goes; why_new=red team and Codex: a checked-out .env could send the user's credentials to its own host; seam=none
 func TestDotenvURLNeedsItsOwnPassword(t *testing.T) {
 	saved := fromDotenv
 	t.Cleanup(func() { fromDotenv = saved })
 
-	// Files a URL could point pgx at, each holding a password.
-	dir := t.TempDir()
-	passfile := filepath.Join(dir, "pgpass")
-	servicefile := filepath.Join(dir, "pg_service.conf")
+	// A home directory with a ~/.pgpass, which pgx reads by default.
+	home := t.TempDir()
+	passfile := filepath.Join(home, ".pgpass")
+	servicefile := filepath.Join(home, ".pg_service.conf")
 	if err := os.WriteFile(passfile, []byte("*:*:*:*:filepw\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -486,11 +494,17 @@ func TestDotenvURLNeedsItsOwnPassword(t *testing.T) {
 
 	// Built with net/url, like TestListConnectionFailure, so no literal
 	// URL with credentials sits in the source.
-	dbURL := func(user *url.Userinfo, query url.Values) string {
-		u := url.URL{Scheme: "postgres", User: user, Host: "other.example", Path: "/postgres", RawQuery: query.Encode()}
+	dbURL := func(user *url.Userinfo, host string, query url.Values) string {
+		u := url.URL{Scheme: "postgres", User: user, Host: host, Path: "/postgres", RawQuery: query.Encode()}
 		return u.String()
 	}
-	const noPassword, otherKey, pgEnv = "no password of its own", "sets something other than", "PG* connection settings are set in your shell"
+	own := url.UserPassword("admin", "own")
+	const (
+		noPassword = "no password of its own"
+		otherKey   = "sets something other than"
+		pgEnv      = "set in your shell, and pgx would use that"
+		twoHosts   = "more than one host"
+	)
 	tests := []struct {
 		name     string
 		url      string
@@ -499,29 +513,29 @@ func TestDotenvURLNeedsItsOwnPassword(t *testing.T) {
 		wantErr  string // "" for none
 		wantPW   string
 	}{
-		{name: "no password in .env", url: dbURL(url.User("admin"), nil), wantErr: noPassword},
-		{name: "password in .env", url: dbURL(url.UserPassword("admin", "own"), nil), wantPW: "own"},
-		{name: "PGPASSWORD in the shell", url: dbURL(url.User("admin"), nil),
+		{name: "no password in .env, ~/.pgpass has one", url: dbURL(url.User("admin"), "other.example", nil), wantErr: noPassword},
+		{name: "password in .env", url: dbURL(own, "other.example", nil), wantPW: "own"},
+		{name: "PGPASSWORD in the shell", url: dbURL(url.User("admin"), "other.example", nil),
 			env: map[string]string{"PGPASSWORD": "admin-secret"}, wantErr: pgEnv},
-		{name: "PGHOST in the shell", url: dbURL(url.UserPassword("admin", "own"), nil),
+		{name: "PGHOST in the shell", url: dbURL(own, "other.example", nil),
 			env: map[string]string{"PGHOST": "prod.example"}, wantErr: pgEnv},
-		{name: "passfile from the environment", url: dbURL(url.User("admin"), nil),
-			env: map[string]string{"PGPASSFILE": passfile}, wantErr: noPassword},
-		{name: "service from the environment", url: dbURL(url.User("admin"), nil),
-			env: map[string]string{"PGSERVICEFILE": servicefile, "PGSERVICE": "prod"}, wantErr: pgEnv},
-		{name: "passfile in the URL", url: dbURL(url.User("admin"), url.Values{"passfile": {passfile}}), wantErr: otherKey},
-		{name: "service in the URL", url: dbURL(url.User("admin"), url.Values{"service": {"prod"}, "servicefile": {servicefile}}),
+		{name: "client certificate in the shell", url: dbURL(own, "other.example", nil),
+			env: map[string]string{"PGSSLCERT": "/x/client.crt", "PGSSLKEY": "/x/client.key"}, wantErr: pgEnv},
+		{name: "PGPASSFILE in the shell", url: dbURL(url.User("admin"), "other.example", nil),
+			env: map[string]string{"PGPASSFILE": passfile}, wantErr: pgEnv},
+		{name: "passfile in the URL", url: dbURL(url.User("admin"), "other.example", url.Values{"passfile": {passfile}}), wantErr: otherKey},
+		{name: "service in the URL", url: dbURL(url.User("admin"), "other.example", url.Values{"service": {"prod"}, "servicefile": {servicefile}}),
 			wantErr: otherKey},
 		{name: "service in keyword form", url: "host=other.example user=admin service=prod servicefile=" + servicefile,
 			wantErr: otherKey},
-		{name: "no password, exported", url: dbURL(url.User("admin"), nil),
+		{name: "two hosts", url: dbURL(own, "localhost,other.example", nil), wantErr: twoHosts},
+		{name: "no password, exported", url: dbURL(url.User("admin"), "other.example", nil),
 			env: map[string]string{"PGPASSWORD": "admin-secret"}, exported: true, wantPW: "admin-secret"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			clearConnEnv(t)
-			t.Setenv("PGPASSFILE", os.DevNull)
-			t.Setenv("PGSERVICEFILE", os.DevNull)
+			clearAllPGEnv(t)
+			t.Setenv("HOME", home)
 			for k, v := range tt.env {
 				t.Setenv(k, v)
 			}
@@ -529,14 +543,7 @@ func TestDotenvURLNeedsItsOwnPassword(t *testing.T) {
 			if tt.exported {
 				t.Setenv("DATABASE_URL", tt.url)
 			} else {
-				os.Unsetenv("DATABASE_URL") // clearConnEnv's t.Setenv restores it afterwards
-				env := filepath.Join(t.TempDir(), ".env")
-				if err := os.WriteFile(env, []byte("DATABASE_URL="+tt.url+"\n"), 0o600); err != nil {
-					t.Fatal(err)
-				}
-				if err := loadDotenv(env, io.Discard); err != nil {
-					t.Fatal(err)
-				}
+				writeDotenvURL(t, tt.url)
 			}
 
 			var notes bytes.Buffer
@@ -557,17 +564,92 @@ func TestDotenvURLNeedsItsOwnPassword(t *testing.T) {
 			if cfg.Password != tt.wantPW {
 				t.Errorf("password = %q, want %q", cfg.Password, tt.wantPW)
 			}
-			if fromFile := !tt.exported; fromFile != strings.Contains(notes.String(), "from .env (host other.example)") {
+			if fromFile := !tt.exported; fromFile != strings.Contains(notes.String(), "from .env (host other.example, port 5432)") {
 				t.Errorf("notes = %q, want the .env host named only for a URL from .env", notes.String())
 			}
+			if _, set := os.LookupEnv("PGPASSFILE"); set {
+				t.Error("PGPASSFILE is still set after connConfig, want it restored (unset)")
+			}
 		})
+	}
+}
+
+// Value: protects=pgx's default client certificate in ~/.postgresql is never presented to a server a .env names; fails_when=dotenvConfig's client-certificate check goes; why_new=pgx loads ~/.postgresql/postgresql.crt and .key by default; seam=none
+func TestDotenvURLRefusesDefaultClientCertificate(t *testing.T) {
+	saved := fromDotenv
+	t.Cleanup(func() { fromDotenv = saved })
+	clearAllPGEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeClientCertificate(t, filepath.Join(home, ".postgresql"))
+	fromDotenv = map[string]bool{}
+	u := url.URL{Scheme: "postgres", User: url.UserPassword("admin", "own"), Host: "other.example", Path: "/postgres"}
+	writeDotenvURL(t, u.String())
+
+	_, err := connConfig(newPrompter(strings.NewReader(""), &bytes.Buffer{}))
+	if err == nil || !strings.Contains(err.Error(), "client certificate") {
+		t.Errorf("connConfig = %v, want a refusal naming the client certificate", err)
+	}
+}
+
+// clearAllPGEnv unsets every PG* variable and DATABASE_URL for this test.
+func clearAllPGEnv(t *testing.T) {
+	t.Helper()
+	clearConnEnv(t)
+	for _, kv := range os.Environ() {
+		if name, _, _ := strings.Cut(kv, "="); strings.HasPrefix(name, "PG") || name == "DATABASE_URL" {
+			t.Setenv(name, "") // restored afterwards
+			os.Unsetenv(name)
+		}
+	}
+}
+
+// writeDotenvURL loads DATABASE_URL=url from a .env file, as Run does.
+func writeDotenvURL(t *testing.T, dsn string) {
+	t.Helper()
+	env := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(env, []byte("DATABASE_URL="+dsn+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := loadDotenv(env, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// writeClientCertificate writes a self-signed postgresql.crt and .key to dir.
+func writeClientCertificate(t *testing.T, dir string) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "admin"},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour)}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name, block := range map[string]*pem.Block{
+		"postgresql.crt": {Type: "CERTIFICATE", Bytes: der},
+		"postgresql.key": {Type: "EC PRIVATE KEY", Bytes: keyDER},
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), pem.EncodeToMemory(block), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
 // Value: protects=error text, which can come from a hostile server, can't send terminal escapes; fails_when=fail prints err raw again; why_new=adversarial review; seam=none
 func TestFailEscapesControlCharacters(t *testing.T) {
 	tests := []struct{ in, want string }{
-		{"plain\nsecond line\tok", "plain\nsecond line\tok"},
+		{"plain\nsecond line\tok", "plain\n  second line\tok"}, // indented, so it can't pose as "nellie: ..."
 		{"bad \x1b[2J clear", `bad \x1b[2J clear`},
 		{"c1 \u009b csi", `c1 \u009b csi`},
 		{"invalid \xff byte", `invalid \xff byte`},
