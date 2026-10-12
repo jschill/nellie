@@ -289,11 +289,12 @@ These are non-negotiable — the tool creates roles and sets passwords.
   ```
 
   Some cases only run, or only make sense, with a superuser admin (granting
-  `pg_monitor`, a superuser acting for every owner). Run those too:
+  `pg_monitor`, a superuser acting for every owner). Run those too, with
+  `NELLIE_TEST_DSN` naming the container's `postgres` superuser instead:
 
   ```
-  NELLIE_TEST_DSN=postgres://postgres:postgres@localhost:55439/postgres go test -tags integration \
-    -run 'TestList|TestPinSession|TestRotatePassword|TestNames|TestProjectName|TestAddUserExplains|TestAddWaits' ./internal/pg/
+  go test -tags integration ./internal/pg/ \
+    -run 'TestList|TestPinSession|TestRotatePassword|TestNames|TestProjectName|TestAddUserExplains|TestAddWaits'
   ```
 
   (Not the whole suite: tests such as `TestAddUserNeedsMembershipInOwner`
