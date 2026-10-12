@@ -3,7 +3,6 @@ package cli
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -55,6 +54,7 @@ type listProject struct {
 type listUser struct {
 	Name       string   `json:"name"`
 	Type       string   `json:"type"`        // "application", "admin" or "privileged"
+	Admin      bool     `json:"admin"`       // a member of the owner role, also when its type is "privileged"
 	Powers     []string `json:"powers"`      // why it's privileged, one per element; [] if it isn't
 	BelongsTo  string   `json:"belongs_to"`  // the database its name belongs to, if not this project; "" otherwise
 	CanConnect bool     `json:"can_connect"` // may connect to the project's database
@@ -90,9 +90,7 @@ func list(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 
 	var out bytes.Buffer
 	if opts.json {
-		enc := json.NewEncoder(&out)
-		enc.SetIndent("", "  ")
-		enc.Encode(listJSON(projects)) // can't fail: only strings and bools, written to memory
+		writeJSON(&out, listJSON(projects))
 	} else {
 		printList(&out, projects)
 	}
@@ -112,7 +110,7 @@ func listJSON(projects []pg.ProjectInfo) []listProject {
 		lp := listProject{Project: p.Name, Owner: p.Owner, OwnerPowers: nonNil(p.OwnerPowers),
 			Template: p.Template, ForeignOwner: p.ForeignOwner, Users: make([]listUser, 0, len(p.Users))}
 		for _, u := range p.Users {
-			lp.Users = append(lp.Users, listUser{Name: u.Name, Type: userType(u), Powers: nonNil(u.Powers), BelongsTo: u.BelongsTo, CanConnect: u.CanConnect, Expired: u.Expired})
+			lp.Users = append(lp.Users, listUser{Name: u.Name, Type: userType(u), Admin: u.Kind == pg.AdminUser, Powers: nonNil(u.Powers), BelongsTo: u.BelongsTo, CanConnect: u.CanConnect, Expired: u.Expired})
 		}
 		res = append(res, lp)
 	}

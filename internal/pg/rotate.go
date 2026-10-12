@@ -41,6 +41,10 @@ type Rotation struct {
 	// doesn't refuse (CREATEDB, owning another database, ...), as nellie list
 	// shows it; nil for none. The new password carries those too.
 	Powers []string
+	// Unchecked lists the lookups after ALTER ROLE that failed, so Database,
+	// Template or Powers may be missing; nil when all ran. The password has
+	// changed either way.
+	Unchecked []string
 }
 
 // RotatePassword sets a new password for role on the server described by cfg.
@@ -70,14 +74,15 @@ func RotatePassword(ctx context.Context, cfg *pgx.ConnConfig, role, password str
 	if err != nil {
 		return Rotation{}, err
 	}
-	// Only roles nellie list shows: on Postgres 15 a CREATEROLE admin may
-	// change any ordinary role's password, including other services' roles.
-	shown, template, err := shownProject(ctx, admin, role)
+	// Only roles of the admin's projects: on Postgres 15 a CREATEROLE admin
+	// may change any ordinary role's password, including other services'.
+	project, template, err := rotatableProject(ctx, admin, role)
 	if err != nil {
 		return Rotation{}, fmt.Errorf("looking up the project of role %q: %w", role, err)
 	}
-	if shown == "" {
-		return Rotation{}, fmt.Errorf("role %q isn't in any project the admin can act for, so nellie list doesn't show it; "+
+	if project == "" {
+		return Rotation{}, fmt.Errorf("role %q isn't in any project nellie rotates passwords for: it must own one of the admin's projects, "+
+			"or be named after one that's owned by the role named after it, as nellie's projects are (nellie list shows where it belongs); "+
 			"change its password with psql's \\password instead", role)
 	}
 	// A single statement is its own transaction, so no runTx here.
@@ -95,17 +100,19 @@ func RotatePassword(ctx context.Context, cfg *pgx.ConnConfig, role, password str
 	}
 
 	// The password has changed by now, so a failed lookup mustn't read as a
-	// failed rotation: without a database the caller just prints no URL.
-	// The warnings (template, powers) are best-effort the same way: skipped
-	// when a lookup fails.
-	rot := Rotation{Expired: expired}
-	if home, usable, err := projectHome(ctx, admin, role); err == nil && usable {
+	// failed rotation. It's reported in Unchecked instead, and the caller
+	// warns; after a Ctrl-C both lookups fail that way.
+	rot := Rotation{Expired: expired, Template: template}
+	if home, usable, err := projectHome(ctx, admin, role); err != nil {
+		rot.Unchecked = append(rot.Unchecked, fmt.Sprintf("finding its project database for the URL (%v)", err))
+	} else if usable {
 		rot.Database = home
 	}
-	// The warnings are about the project nellie list shows the role under,
-	// so the two commands agree.
-	rot.Template = template
-	rot.Powers, _ = rolePowers(ctx, admin, role, shown)
+	// The powers are about the project nellie list shows the role under, so
+	// the two commands agree.
+	if rot.Powers, err = rolePowers(ctx, admin, role, project); err != nil {
+		rot.Unchecked = append(rot.Unchecked, fmt.Sprintf("checking its powers beyond the project (%v)", err))
+	}
 	return rot, nil
 }
 
@@ -192,15 +199,30 @@ func projectHome(ctx context.Context, conn *pgx.Conn, role string) (home string,
 	return home, usable, err
 }
 
-// shownProject returns the project nellie list shows role under (see
-// ListSQL's users): the longest of role's projectCandidates that is one of
-// the admin's projects, or "" for none, and whether it's a template database.
-func shownProject(ctx context.Context, conn *pgx.Conn, role string) (project string, template bool, err error) {
+// rotatableProject returns the project whose role rotate-password may change,
+// or "" for none, and whether it's a template database. That's role's home
+// by name (the longest database of all, as for nellie list) if it's one of
+// the admin's projects owned by the role named after it, the rule a
+// connection URL follows too, or else one of the admin's projects that role
+// owns. The home comes first, so the powers match role's row in nellie list.
+// The second half matters: a project owner with CREATEDB can create a
+// database named after any role, which the admin then acts for, but not
+// owned by a role of that name. And a role whose home is someone else's
+// database, which nellie list shows with "belongs to", isn't the project's.
+func rotatableProject(ctx context.Context, conn *pgx.Conn, role string) (project string, template bool, err error) {
 	err = conn.QueryRow(ctx, `
-		SELECT datname, datistemplate FROM pg_database d
-		WHERE datname = ANY($1::text[]) AND `+isProjectExpr+`
-		ORDER BY length(datname) DESC LIMIT 1`,
-		projectCandidates(role),
+		WITH home AS (
+			SELECT oid FROM pg_database WHERE datname = ANY($1::text[])
+			ORDER BY length(datname) DESC LIMIT 1
+		), owner AS (
+			SELECT oid FROM pg_roles WHERE rolname = $2
+		)
+		SELECT d.datname, d.datistemplate FROM pg_database d
+		WHERE `+isProjectExpr+` AND (
+			d.datdba = (SELECT oid FROM owner)
+			OR (d.oid = (SELECT oid FROM home) AND pg_get_userbyid(d.datdba) = d.datname))
+		ORDER BY d.oid = (SELECT oid FROM home) DESC, length(d.datname) DESC LIMIT 1`,
+		projectCandidates(role), role,
 	).Scan(&project, &template)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", false, nil

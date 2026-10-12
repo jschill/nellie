@@ -93,9 +93,9 @@ func TestListJSON(t *testing.T) {
 			{Name: "shop_app", Kind: pg.AppUser, CanConnect: true, Expired: true},
 			{Name: "shop_boss", Kind: pg.AdminUser, Powers: []string{"CREATEROLE", "member of x, y"}, BelongsTo: "shop_boss"},
 		}}}, `[{"project":"shop","owner":"shop","owner_powers":[],"template":false,"foreign_owner":false,"users":[` +
-			`{"name":"shop_admin","type":"admin","powers":[],"belongs_to":"","can_connect":false,"expired":false},` +
-			`{"name":"shop_app","type":"application","powers":[],"belongs_to":"","can_connect":true,"expired":true},` +
-			`{"name":"shop_boss","type":"privileged","powers":["CREATEROLE","member of x, y"],"belongs_to":"shop_boss","can_connect":false,"expired":false}]}]`},
+			`{"name":"shop_admin","type":"admin","admin":true,"powers":[],"belongs_to":"","can_connect":false,"expired":false},` +
+			`{"name":"shop_app","type":"application","admin":false,"powers":[],"belongs_to":"","can_connect":true,"expired":true},` +
+			`{"name":"shop_boss","type":"privileged","admin":true,"powers":["CREATEROLE","member of x, y"],"belongs_to":"shop_boss","can_connect":false,"expired":false}]}]`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -177,5 +177,21 @@ func TestPrintable(t *testing.T) {
 		if got := printable(tt.in); got != tt.want {
 			t.Errorf("printable(%q) = %s, want %s", tt.in, got, tt.want)
 		}
+	}
+}
+
+// Value: protects=--json escapes non-printing characters that encoding/json leaves raw, such as a C1 CSI or a bidi override in a role name; fails_when=list or rotate-password goes back to a plain json.Encoder; why_new=Fable review #8; seam=none
+func TestWriteJSONEscapesNonPrinting(t *testing.T) {
+	var out bytes.Buffer
+	writeJSON(&out, []string{"a\u009bb", "c\u202ed", "umlaut ä", "emoji \U0001F418", "tab\tx"})
+	got := out.String()
+	for _, want := range []string{`a\u009bb`, `c\u202ed`, "umlaut ä", "emoji \U0001F418", `tab\tx`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("output %q lacks %q", got, want)
+		}
+	}
+	var back []string
+	if err := json.Unmarshal(out.Bytes(), &back); err != nil || back[0] != "a\u009bb" || back[1] != "c\u202ed" {
+		t.Errorf("round trip: %q, %v", back, err)
 	}
 }

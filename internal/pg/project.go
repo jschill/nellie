@@ -70,6 +70,9 @@ func CreateProject(ctx context.Context, cfg *pgx.ConnConfig, p Project, password
 	if err := checkServerVersion(ctx, admin); err != nil {
 		return err
 	}
+	if err := lockAdd(ctx, admin); err != nil {
+		return err
+	}
 	if err := checkNamesFree(ctx, admin, []string{p.Name}, []string{p.Name}); err != nil {
 		return err
 	}

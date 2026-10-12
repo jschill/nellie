@@ -64,8 +64,11 @@ as one non-empty line, unconfirmed (that's the secrets-manager path, so
 there's no `--password-stdin`); an empty piped line is an error, not
 "generate". With piped input the input is only the password: the
 user must be the argument and the admin connection must come from the
-environment, else exit 2. It refuses roles that `list` doesn't show (no
-project by `shownProject`; on Postgres 15 CREATEROLE could rotate anyone),
+shell environment, not `.env`, else exit 2. It only rotates roles of the
+admin's projects (`rotatableProject`; on Postgres 15 CREATEROLE could
+rotate anyone): the role's name-home, if it's a project owned by the role
+named after it (the URL rule; a CREATEDB owner's look-alike database or a
+`belongs_to` stray fails it), or else a project the role owns. It refuses
 roles that don't exist, can't log in,
 are superusers, are the admin itself, have `CREATEROLE`, `REPLICATION` or
 `BYPASSRLS`, or are members of a role that has, or of any predefined `pg_*`
@@ -78,8 +81,10 @@ it, and the role can connect to it (`canConnectExpr`, shared with `list`).
 Never a shorter one: picking by CONNECT let database owners redirect the URL,
 and the owner rule stops a CREATEDB role's look-alike database. It warns,
 like `list`, about powers beyond the project and template projects, both
-computed against the project `list` shows the role under (`shownProject`;
-the project predicate is `isProjectExpr`, shared with `list`).
+computed against that project (`isProjectExpr` is the project predicate,
+shared with `list`). Lookups that fail after `ALTER ROLE` are warnings
+(`Rotation.Unchecked`), and a Ctrl-C after it exits 130 after printing the
+result.
 
 `list` shows the databases whose owner's privileges the admin has
 (`pg_has_role(datdba, 'USAGE')`, as in `add-user`; not `'MEMBER'`, which on
@@ -154,7 +159,7 @@ Run all of these before calling a change done.
   fixed message instead. Keep it that way.
 - Asking: the prompt hides input on a terminal (`golang.org/x/term`), since the
   URL usually holds the admin password; empty input means pgx's local defaults.
-  `~/.pgpass` works via pgx in every case.
+  `~/.pgpass` works via pgx, except for a `DATABASE_URL` from `.env`.
 - `cli.Run` loads `.env` from the current directory first (own small parser
   in `internal/cli/dotenv.go`, no dependency). Variables already set in the
   environment win. Only `DATABASE_URL` loads; every other key (`PG*`,
@@ -254,7 +259,9 @@ These are non-negotiable — the tool creates roles and sets passwords.
   Postgres allows it. `CREATE DATABASE` can't run in a transaction, so on failure
   after it, clean up explicitly and say what was left behind.
 - **Existing objects:** `add-*` fails with a clear error if the role or
-  database already exists. No silent no-ops, no `--force`.
+  database already exists. No silent no-ops, no `--force`. Both hold an
+  advisory lock (`lockAdd`) from the name checks to the end, so two runs on
+  the same admin database can't both pass the checks.
 - **`--dry-run`** prints the SQL that would run and touches nothing.
 
 ## Output and exit codes
@@ -280,6 +287,17 @@ These are non-negotiable — the tool creates roles and sets passwords.
   docker exec nellie-pg psql -U postgres -c "CREATE ROLE nellie_admin LOGIN CREATEROLE CREATEDB PASSWORD 'admin'"
   NELLIE_TEST_DSN=postgres://nellie_admin:admin@localhost:55439/postgres go test -tags integration ./...
   ```
+
+  Some cases only run, or only make sense, with a superuser admin (granting
+  `pg_monitor`, a superuser acting for every owner). Run those too:
+
+  ```
+  NELLIE_TEST_DSN=postgres://postgres:postgres@localhost:55439/postgres go test -tags integration \
+    -run 'TestList|TestPinSession|TestRotatePassword|TestNames|TestProjectName|TestAddUserExplains|TestAddWaits' ./internal/pg/
+  ```
+
+  (Not the whole suite: tests such as `TestAddUserNeedsMembershipInOwner`
+  assume a non-superuser admin.)
 
 ## Open items
 

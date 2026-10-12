@@ -145,6 +145,21 @@ func checkVersion(version int) error {
 	return nil
 }
 
+// lockAddKey is the advisory lock that add-project and add-user hold from
+// their name checks until they're done, so two nellie runs can't both pass
+// the checks and then create overlapping names. Advisory locks are per
+// database, so this serializes runs whose admin connects to the same one.
+const lockAddKey = 0x6e656c6c6965 // "nellie"
+
+// lockAdd takes lockAddKey for the rest of conn's session; closing conn
+// releases it. It waits for another run, until ctx is done.
+func lockAdd(ctx context.Context, conn *pgx.Conn) error {
+	if _, err := conn.Exec(ctx, "SELECT pg_advisory_lock($1)", int64(lockAddKey)); err != nil {
+		return fmt.Errorf("waiting for another nellie run: %w", err)
+	}
+	return nil
+}
+
 // ErrAmbiguous means a new name would make nellie's name-to-project mapping
 // ambiguous: list and rotate-password assign a role to the longest database
 // its name matches, so names must not overlap.

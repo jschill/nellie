@@ -3,7 +3,9 @@
 package cli
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -16,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf16"
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
@@ -83,10 +86,13 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprint(stderr, usage)
 		return exitUsage
 	}
-	// Before .env is read, so a broken .env can't block it.
+	// Before .env is read, so a broken .env can't block them.
 	switch args[0] {
 	case "version", "-version", "--version":
 		fmt.Fprintf(stdout, "nellie %s\n", Version)
+		return exitOK
+	case "help", "-h", "-help", "--help":
+		fmt.Fprint(stdout, usage)
 		return exitOK
 	}
 	if err := loadDotenv(".env", stderr); err != nil {
@@ -102,9 +108,6 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return rotatePassword(args[1:], stdin, stdout, stderr)
 	case "list", "trumpet":
 		return list(args[1:], stdin, stdout, stderr)
-	case "help", "-h", "-help", "--help":
-		fmt.Fprint(stdout, usage)
-		return exitOK
 	default:
 		fmt.Fprintf(stderr, "nellie: unknown command %q\n\n%s", args[0], usage)
 		return exitUsage
@@ -112,8 +115,8 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 }
 
 // connConfig resolves the admin connection: $DATABASE_URL, then the standard
-// PG* environment variables, then asking. Whatever pgx gets, it also reads
-// ~/.pgpass, like psql.
+// PG* environment variables, then asking. pgx also reads ~/.pgpass, like
+// psql, except for a DATABASE_URL from .env (see dotenvConfig).
 //
 // There is deliberately no --dsn flag: a connection string on the command line
 // would carry the admin password into shell history and the process list.
@@ -173,7 +176,8 @@ func dotenvConfig(p *prompter, dsn string) (*pgx.ConnConfig, error) {
 				"in .env names; set DATABASE_URL in your shell instead")
 		}
 	}
-	fmt.Fprintf(p.out, "nellie: using DATABASE_URL from .env (host %s, port %d)\n", printable(cfg.Host), cfg.Port)
+	fmt.Fprintf(p.out, "nellie: using DATABASE_URL from .env: %s@%s:%d/%s\n",
+		printable(cfg.User), printable(cfg.Host), cfg.Port, printable(cfg.Database))
 	return cfg, nil
 }
 
@@ -226,7 +230,7 @@ func requireOwnPassword(dsn string) error {
 	}
 	if cfg.Password == "" {
 		return errors.New("the DATABASE_URL in .env has no password of its own, and nellie won't fill one in from " +
-			"PGPASSWORD, ~/.pgpass or a service file for a URL a checked-out .env can point anywhere; " +
+			"~/.pgpass or a service file for a URL a checked-out .env can point anywhere; " +
 			"put the password in that URL, or set DATABASE_URL in your shell instead")
 	}
 	return nil
@@ -450,4 +454,29 @@ func connURL(cfg *pgx.ConnConfig, user, password, db string) string {
 	}
 	u.RawQuery = query.Encode()
 	return u.String()
+}
+
+// writeJSON encodes v as indented JSON into w, with every non-printing
+// character escaped as \uXXXX. encoding/json already escapes ASCII control
+// characters, but not, say, U+009B (a terminal's CSI) or U+202E (which
+// reverses text), and --json output often ends up on a terminal via jq.
+func writeJSON(w *bytes.Buffer, v any) {
+	var raw bytes.Buffer
+	enc := json.NewEncoder(&raw)
+	enc.SetIndent("", "  ")
+	enc.Encode(v) // can't fail: only strings, bools and slices of them, written to memory
+	for s := raw.String(); len(s) > 0; {
+		r, size := utf8.DecodeRuneInString(s)
+		if r >= utf8.RuneSelf && !unicode.IsPrint(r) {
+			// Only inside strings: JSON outside them is plain ASCII.
+			if r1, r2 := utf16.EncodeRune(r); r1 != utf8.RuneError {
+				fmt.Fprintf(w, `\u%04x\u%04x`, r1, r2)
+			} else {
+				fmt.Fprintf(w, `\u%04x`, r)
+			}
+		} else {
+			w.WriteString(s[:size])
+		}
+		s = s[size:]
+	}
 }

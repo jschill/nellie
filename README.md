@@ -93,7 +93,7 @@ with a warning, so a checked-out `.env` can't point nellie at another server
 or change how it checks TLS. Set those in your shell.
 
 A `.env` file comes with whatever repo you cloned, so its `DATABASE_URL` is
-held to a few more rules, and nellie names the host it connects to:
+held to a few more rules, and nellie prints the user, host, port and database it connects to:
 
 - It must contain its own password. Otherwise pgx would fill one in from
   `~/.pgpass` or a service file and send it to whatever host the URL names.
@@ -224,9 +224,10 @@ op read op://vault/shop-app/password | nellie rotate-password shop_app
 Piped input is only ever the password, on a single line, read until the input
 ends (so close it, or press Ctrl-D if you're typing into a non-terminal like
 `docker exec -i`): name the user as the argument, and
-put the admin connection in `DATABASE_URL` (or `.env`, or the `PG*`
-variables). Otherwise nellie stops with a usage error rather than reading
-the password as something else. An empty pipe, or an empty line, is an error
+put the admin connection in `DATABASE_URL` or the `PG*` variables in your
+shell. Not in `.env`: in a pipeline nobody reads which server a checked-out
+`.env` names before the secret goes there. Otherwise nellie stops with a
+usage error rather than reading the password as something else. An empty pipe, or an empty line, is an error
 rather than "generate one", because it usually means the command feeding it
 failed (say, `echo "$PW"` with `PW` unset). In scripts, use `--generate`.
 
@@ -234,9 +235,12 @@ The old password stops working at once; sessions that are already connected
 stay connected. Postgres has one password per role, so there's no overlap
 window: update the app's config right after.
 
-nellie only rotates roles that `nellie list` shows: project owners and the
-users of the admin's projects. On Postgres 15 the admin could otherwise
-change any ordinary role's password on the server. Within those, it won't
+nellie only rotates the owners and users of the admin's projects. On
+Postgres 15 the admin could otherwise change any ordinary role's password on
+the server. A user counts when its name belongs to a project shaped like
+nellie's, owned by the role named after it (the rule for the connection URL
+too); a role `nellie list` shows with "belongs to database ...", or a user of
+a database whose owner has another name, is left to `psql`. Within those, it won't
 touch roles that can't log in, superusers, the admin role it's
 connected as, or roles with powers nellie never gives its own roles
 (`CREATEROLE`, `REPLICATION`, `BYPASSRLS`, such as another admin), directly
@@ -317,7 +321,7 @@ allow that). If a project you expect is missing on Postgres 15, check with
 | --- | --- |
 | `--dry-run` | Print the SQL instead of running it. Doesn't connect. Passwords show as `<redacted>`. All commands (for `list`, the query it runs, after pinning `search_path`). |
 | `--generate` | Generate the new password without asking. `rotate-password` only. |
-| `--json` | Print the result as JSON, not together with `--dry-run`. `rotate-password`: `user`; `database` and `url` when the role's project database is usable (see `rotate-password` above); `password` only if nellie generated it; `expired` (the role's `VALID UNTIL` has passed), `template` (its project is a template) and `powers` (as in `list`, `[]` for none), always present. `list`: an array of `{"project", "owner", "owner_powers", "template", "foreign_owner", "users": [{"name", "type", "powers", "belongs_to", "can_connect", "expired"}]}`, where `type` is `application`, `admin` or `privileged`, `powers` and `owner_powers` are arrays with one power each (`[]` for none), and `belongs_to` names the database a user's name belongs to when that isn't the project (`""` otherwise). |
+| `--json` | Print the result as JSON, not together with `--dry-run`. Non-printing characters in names are escaped as `\uXXXX`. `rotate-password`: `user`; `database` and `url` when the role's project database is usable (see `rotate-password` above); `password` only if nellie generated it; `expired` (the role's `VALID UNTIL` has passed), `template` (its project is a template) and `powers` (as in `list`, `[]` for none), always present. `list`: an array of `{"project", "owner", "owner_powers", "template", "foreign_owner", "users": [{"name", "type", "admin", "powers", "belongs_to", "can_connect", "expired"}]}`, where `type` is `application`, `admin` or `privileged`, `admin` says the user is a member of the owner (also when it's `privileged`), `powers` and `owner_powers` are arrays with one power each (`[]` for none), and `belongs_to` names the database a user's name belongs to when that isn't the project (`""` otherwise). |
 
 Flags can go before or after the user name.
 

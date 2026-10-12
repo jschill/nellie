@@ -131,6 +131,9 @@ func AddUser(ctx context.Context, cfg *pgx.ConnConfig, u User, password string) 
 	if err != nil {
 		return err
 	}
+	if err := lockAdd(ctx, admin); err != nil {
+		return err
+	}
 	if err := checkNamesFree(ctx, admin, nil, []string{u.Name}); err != nil {
 		return err
 	}
@@ -174,17 +177,19 @@ func AddUser(ctx context.Context, cfg *pgx.ConnConfig, u User, password string) 
 // admin role can act as it, which the grants in AddUser need.
 func projectOwner(ctx context.Context, conn *pgx.Conn, db string) (string, error) {
 	var owner string
-	var canAct, member bool
+	var canAct, member, pg16 bool
 	// "Member" here means one that could SET ROLE to the owner. On Postgres
 	// 16+ that's the SET privilege: MEMBER also matches the ADMIN-only
 	// membership a CREATEROLE admin keeps in every role it created, and 'SET'
 	// isn't known to Postgres 15, where MEMBER is right.
 	err := conn.QueryRow(ctx, `
 		SELECT pg_get_userbyid(datdba), pg_has_role(datdba, 'USAGE'),
-			pg_has_role(datdba, CASE WHEN current_setting('server_version_num')::int >= 160000 THEN 'SET' ELSE 'MEMBER' END)
-		FROM pg_database WHERE datname = $1`,
+			pg_has_role(datdba, CASE WHEN v.pg16 THEN 'SET' ELSE 'MEMBER' END), v.pg16
+		FROM pg_database,
+			(SELECT current_setting('server_version_num')::int >= 160000 AS pg16) v
+		WHERE datname = $1`,
 		db,
-	).Scan(&owner, &canAct, &member)
+	).Scan(&owner, &canAct, &member, &pg16)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", fmt.Errorf("database %s %w", db, ErrNotFound)
 	}
@@ -193,9 +198,14 @@ func projectOwner(ctx context.Context, conn *pgx.Conn, db string) (string, error
 	}
 	if !canAct && member {
 		// A NOINHERIT admin, or on Postgres 16+ a grant WITH INHERIT FALSE:
-		// nellie list leaves these databases out for the same reason.
+		// nellie list leaves these databases out for the same reason. Each
+		// grant has its own INHERIT option only since 16.
+		fix := "make the admin role INHERIT (ALTER ROLE ... INHERIT)"
+		if pg16 {
+			fix = "grant the membership again WITH INHERIT TRUE"
+		}
 		return "", fmt.Errorf("can't grant access to database %q: the admin role is a member of its owner %q but doesn't "+
-			"inherit its privileges (NOINHERIT, or a grant WITH INHERIT FALSE); grant the membership WITH INHERIT TRUE", db, owner)
+			"inherit its privileges (NOINHERIT, or a grant WITH INHERIT FALSE); %s", db, owner, fix)
 	}
 	if !canAct {
 		return "", fmt.Errorf("can't grant access to database %s: the admin role isn't a member of its owner %q "+

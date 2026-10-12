@@ -3,7 +3,6 @@ package cli
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -23,8 +22,9 @@ one line, so a password can come from a secrets manager:
 
 With piped input, the input is only the password, on a single, non-empty line,
 read until the input ends (close it, or press Ctrl-D if you're typing):
-give the user as the argument, and the admin connection in DATABASE_URL (or
-.env, or PG* variables). In scripts, use --generate for a generated password.
+give the user as the argument, and the admin connection in DATABASE_URL or
+PG* variables in your shell (not .env). In scripts, use --generate for a
+generated password.
 
 The old password stops working at once; sessions already connected stay
 connected. A generated password is shown once; a typed one is never shown.
@@ -73,7 +73,13 @@ func rotatePassword(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 			return exitUsage
 		}
 		if !opts.dryRun && os.Getenv("DATABASE_URL") == "" && !hasPGEnv() {
-			fmt.Fprintln(stderr, "nellie: with piped input, set DATABASE_URL (in the environment or .env) or the PG* variables for the admin connection: the input is read as the new password")
+			fmt.Fprintln(stderr, "nellie: with piped input, set DATABASE_URL or the PG* variables in your shell for the admin connection: the input is read as the new password")
+			return exitUsage
+		}
+		// A piped secret usually comes from a secrets manager in a script,
+		// where nobody reads the .env host notice before the rotation.
+		if !opts.dryRun && fromDotenv["DATABASE_URL"] {
+			fmt.Fprintln(stderr, "nellie: with piped input, set DATABASE_URL in your shell, not .env: a checked-out .env could send the new password's verifier to a server of its choosing")
 			return exitUsage
 		}
 	}
@@ -136,6 +142,10 @@ func rotatePassword(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 		fmt.Fprintf(stderr, "nellie: warning: role %s has powers beyond its project (%s), and the new password carries them too\n",
 			user, powersNote(rot.Powers))
 	}
+	for _, what := range rot.Unchecked {
+		fmt.Fprintf(stderr, "nellie: warning: the password of %s changed, but %s failed, so the result below may be incomplete\n",
+			user, terminalSafe(what))
+	}
 	if rot.Expired {
 		fmt.Fprintf(stderr, "nellie: warning: the VALID UNTIL of role %s has passed, so its new password won't work either; "+
 			"clear it with %s\n", user, pg.ClearExpirySQL(user))
@@ -149,15 +159,19 @@ func rotatePassword(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 	signal.Ignore(syscall.SIGPIPE)
 	var out bytes.Buffer
 	if opts.json {
-		enc := json.NewEncoder(&out)
-		enc.SetIndent("", "  ")
-		enc.Encode(res) // can't fail: res holds only strings, and out is in memory
+		writeJSON(&out, res)
 	} else {
 		printRotated(&out, res)
 	}
 	if _, err := stdout.Write(out.Bytes()); err != nil {
 		fmt.Fprintf(stderr, "nellie: the password of %s was changed, but the result couldn't be written (%v); run this again for a new one\n", user, err)
 		return exitError
+	}
+	if ctx.Err() != nil {
+		// Ctrl-C after ALTER ROLE: the password changed and is shown above,
+		// but the checks after it were cut short.
+		fmt.Fprintf(stderr, "nellie: interrupted after the password of %s changed\n", user)
+		return exitInterrupted
 	}
 	return exitOK
 }

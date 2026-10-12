@@ -24,7 +24,7 @@ performer, and who's been sneaking into the elephant enclosure.*
   the closest project with a `belongs to database ...` note instead of
   disappearing.
 - `list --json` for scripts: one object per project with its owner, flags and
-  users. `--dry-run` prints the query it would run.
+  users, including whether each user is a member of the owner. `--dry-run` prints the query it would run.
 - `rotate-password` warns when the role has powers beyond its project or its
   project is a template, the same things `list` shows, and its `--json`
   gains `expired`, `template` and `powers`.
@@ -44,18 +44,26 @@ performer, and who's been sneaking into the elephant enclosure.*
 - `.env` only sets `DATABASE_URL` now; anything else in it is ignored with a
   warning. A `DATABASE_URL` from `.env` must contain its own password and
   name a single host, may only set the host, port, user, password, database,
-  `sslmode` and `connect_timeout`, and nellie prints the host it points at.
+  `sslmode` and `connect_timeout`, and nellie prints the user, host, port and database it points at.
   A checked-out `.env` can't get your admin password, client certificate or
   other `PG*` settings sent to a server of its choosing (it can still choose
   the server, so check the printed host). Set `DATABASE_URL` in your shell if
   you need more.
 - If you export any `PG*` variable (even just `PGPASSWORD`) and also keep a
   `DATABASE_URL` in `.env`, nellie now refuses until you unset one of them.
-- `rotate-password` only changes the password of roles `nellie list` shows.
-  On Postgres 15 it could otherwise reach any ordinary role on the server.
+- `rotate-password` only changes the passwords of the owners and users of
+  the admin's projects; a user counts when its name belongs to a project
+  owned by the role named after it. On Postgres 15 it could otherwise reach
+  any ordinary role on the server. A failed check after the change is a
+  warning, and Ctrl-C after it exits 130 with the result still printed.
+- Piped `rotate-password` needs the admin connection from your shell, not
+  `.env`.
+- `add-project` and `add-user` wait for each other, so two runs at once
+  can't both pass the name checks.
 - `add-user` says so when the admin is a member of a project's owner but
   doesn't inherit its privileges (`NOINHERIT`, or a grant `WITH INHERIT
-  FALSE`), instead of claiming it isn't a member.
+  FALSE`), with the fix for your Postgres version, instead of claiming it
+  isn't a member.
 
 ### Fixed
 
@@ -63,6 +71,9 @@ performer, and who's been sneaking into the elephant enclosure.*
   what the server says (and indent its extra lines), so neither can scribble
   on your terminal or pose as nellie's own output.
 - A `.env` saved with a byte order mark no longer loses its first line.
+- `nellie help` works next to a broken `.env`, like `--version`.
+- `--json` escapes non-printing characters such as U+202E, which
+  `encoding/json` leaves as they are.
 
 ## [0.2.0.0] - 2026-10-09
 

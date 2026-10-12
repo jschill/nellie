@@ -531,6 +531,9 @@ func TestDotenvURLNeedsItsOwnPassword(t *testing.T) {
 		{name: "two hosts", url: dbURL(own, "localhost,other.example", nil), wantErr: twoHosts},
 		{name: "no password, exported", url: dbURL(url.User("admin"), "other.example", nil),
 			env: map[string]string{"PGPASSWORD": "admin-secret"}, exported: true, wantPW: "admin-secret"},
+		// Control: the same ~/.pgpass is read for an exported URL, so the
+		// first row's refusal isn't just a file pgx never looks at.
+		{name: "no password, exported, ~/.pgpass", url: dbURL(url.User("admin"), "other.example", nil), exported: true, wantPW: "filepw"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -564,7 +567,7 @@ func TestDotenvURLNeedsItsOwnPassword(t *testing.T) {
 			if cfg.Password != tt.wantPW {
 				t.Errorf("password = %q, want %q", cfg.Password, tt.wantPW)
 			}
-			if fromFile := !tt.exported; fromFile != strings.Contains(notes.String(), "from .env (host other.example, port 5432)") {
+			if fromFile := !tt.exported; fromFile != strings.Contains(notes.String(), "from .env: admin@other.example:5432/postgres") {
 				t.Errorf("notes = %q, want the .env host named only for a URL from .env", notes.String())
 			}
 			if _, set := os.LookupEnv("PGPASSFILE"); set {
@@ -662,5 +665,36 @@ func TestFailEscapesControlCharacters(t *testing.T) {
 		if got, want := stderr.String(), "nellie: "+tt.want+"\n"; got != want {
 			t.Errorf("fail(%q) printed %q, want %q", tt.in, got, want)
 		}
+	}
+}
+
+// Value: protects=help works next to a broken .env, like --version; fails_when=help moves back after loadDotenv; why_new=Fable review #15; seam=none
+func TestHelpIgnoresBrokenDotenv(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("not a valid line\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	for _, arg := range []string{"help", "--help", "--version"} {
+		var stdout, stderr bytes.Buffer
+		if code := Run([]string{arg}, strings.NewReader(""), &stdout, &stderr); code != exitOK || stdout.Len() == 0 {
+			t.Errorf("%s: exit %d, stdout %q, stderr %q; want exit 0 and output", arg, code, stdout.String(), stderr.String())
+		}
+	}
+}
+
+// Value: protects=piped rotate-password refuses a DATABASE_URL from .env, so a script's secret never goes to a server a checked-out .env chose; fails_when=the fromDotenv check in rotatePassword goes; why_new=Fable review #5; seam=none
+func TestRotatePipedRefusesDotenvURL(t *testing.T) {
+	saved := fromDotenv
+	t.Cleanup(func() { fromDotenv = saved })
+	clearAllPGEnv(t)
+	fromDotenv = map[string]bool{}
+	u := url.URL{Scheme: "postgres", User: url.UserPassword("admin", "own"), Host: "other.example", Path: "/postgres"}
+	writeDotenvURL(t, u.String())
+
+	var stdout, stderr bytes.Buffer
+	code := rotatePassword([]string{"shop_app"}, strings.NewReader("new-secret-from-a-vault\n"), &stdout, &stderr)
+	if code != exitUsage || !strings.Contains(stderr.String(), "not .env") || stdout.Len() != 0 {
+		t.Errorf("exit %d, stdout %q, stderr %q; want exit 2 and a refusal naming .env", code, stdout.String(), stderr.String())
 	}
 }
