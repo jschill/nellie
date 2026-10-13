@@ -187,7 +187,13 @@ User name: shop_app
 > role is invisible to them, which is a very confusing afternoon.
 
 `add-user` also works on databases nellie didn't create, as long as the
-admin role is a member of the database's owner.
+admin role is a member of the database's owner. If that owner isn't named
+after the database (say `legacy`, owned by `dba`), `rotate-password` won't
+change the new user's password later: use `psql`'s `\password` for it. That
+rule keeps a look-alike database from making an outside role rotatable.
+
+If another nellie run is creating a project or user on the same server,
+`add-project` and `add-user` wait for it and say so.
 
 A user name that a longer database would claim is refused: with a database
 `shop_v2`, project `shop` can't get a user `shop_v2_app`. Pick another suffix.

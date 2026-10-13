@@ -151,9 +151,25 @@ func checkVersion(version int) error {
 // database, so this serializes runs whose admin connects to the same one.
 const lockAddKey = 0x6e656c6c6965 // "nellie"
 
+// LockWait, if set, is called when add-project or add-user finds another
+// nellie run holding the lock and starts waiting for it, so the caller can
+// say why nothing happens. The pg package itself never prints.
+var LockWait func()
+
 // lockAdd takes lockAddKey for the rest of conn's session; closing conn
-// releases it. It waits for another run, until ctx is done.
+// releases it. If another run holds it, it calls LockWait and waits, until
+// ctx is done.
 func lockAdd(ctx context.Context, conn *pgx.Conn) error {
+	var got bool
+	if err := conn.QueryRow(ctx, "SELECT pg_try_advisory_lock($1)", int64(lockAddKey)).Scan(&got); err != nil {
+		return fmt.Errorf("taking nellie's lock: %w", err)
+	}
+	if got {
+		return nil
+	}
+	if LockWait != nil {
+		LockWait()
+	}
 	if _, err := conn.Exec(ctx, "SELECT pg_advisory_lock($1)", int64(lockAddKey)); err != nil {
 		return fmt.Errorf("waiting for another nellie run: %w", err)
 	}

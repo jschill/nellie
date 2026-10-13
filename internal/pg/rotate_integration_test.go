@@ -9,7 +9,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -565,10 +564,16 @@ func TestAddWaitsForAnotherRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	short, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	// No timing: LockWait fires once CreateProject finds the lock taken,
+	// and cancelling there stops the wait.
+	waiting, cancel := context.WithCancel(ctx)
 	defer cancel()
-	if err := CreateProject(short, cfg, p, NewPassword()); err == nil || !strings.Contains(err.Error(), "waiting for another nellie run") {
-		t.Errorf("CreateProject while another run holds the lock: got %v, want it to wait and time out", err)
+	waited := false
+	LockWait = func() { waited = true; cancel() }
+	t.Cleanup(func() { LockWait = nil })
+	err = CreateProject(waiting, cfg, p, NewPassword())
+	if !waited || err == nil || !strings.Contains(err.Error(), "waiting for another nellie run") {
+		t.Errorf("CreateProject while another run holds the lock: LockWait called = %v, err = %v; want it to wait", waited, err)
 		if err == nil {
 			dropProject(context.Background(), cfg, p, true)
 		}

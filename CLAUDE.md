@@ -261,7 +261,10 @@ These are non-negotiable — the tool creates roles and sets passwords.
 - **Existing objects:** `add-*` fails with a clear error if the role or
   database already exists. No silent no-ops, no `--force`. Both hold an
   advisory lock (`lockAdd`) from the name checks to the end, so two runs on
-  the same admin database can't both pass the checks.
+  the same admin database can't both pass the checks; while waiting, the
+  `pg.LockWait` hook lets the CLI say so (pg never prints). `add-user` still
+  works in databases whose owner isn't named after them, but their users
+  can't be rotated (the rotate gate); that's documented, not refused.
 - **`--dry-run`** prints the SQL that would run and touches nothing.
 
 ## Output and exit codes

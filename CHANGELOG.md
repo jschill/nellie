@@ -58,8 +58,10 @@ performer, and who's been sneaking into the elephant enclosure.*
   warning, and Ctrl-C after it exits 130 with the result still printed.
 - Piped `rotate-password` needs the admin connection from your shell, not
   `.env`.
-- `add-project` and `add-user` wait for each other, so two runs at once
-  can't both pass the name checks.
+- `add-project` and `add-user` wait for each other, and say so, so two runs
+  at once can't both pass the name checks.
+- Users that `add-user` creates in a database whose owner isn't named after
+  it can't be rotated by nellie; use `psql`'s `\password` for those.
 - `add-user` says so when the admin is a member of a project's owner but
   doesn't inherit its privileges (`NOINHERIT`, or a grant `WITH INHERIT
   FALSE`), with the fix for your Postgres version, instead of claiming it
