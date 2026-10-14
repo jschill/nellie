@@ -3,12 +3,23 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
+	"math/big"
+	"net/url"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -462,5 +473,228 @@ func TestDryRunIsMarkedNotRunnable(t *testing.T) {
 				t.Errorf("dry run must redact the password:\n%s", out)
 			}
 		})
+	}
+}
+
+// Value: protects=a DATABASE_URL from .env never gets a password, client certificate or other setting from the user's shell or home directory, and names exactly one host; fails_when=dotenvConfig's PG* refusal, single-host check, client-certificate check or requireOwnPassword's allow-list or passfile hiding goes; why_new=red team and Codex: a checked-out .env could send the user's credentials to its own host; seam=none
+func TestDotenvURLNeedsItsOwnPassword(t *testing.T) {
+	saved := fromDotenv
+	t.Cleanup(func() { fromDotenv = saved })
+
+	// A home directory with a ~/.pgpass, which pgx reads by default.
+	home := t.TempDir()
+	passfile := filepath.Join(home, ".pgpass")
+	servicefile := filepath.Join(home, ".pg_service.conf")
+	if err := os.WriteFile(passfile, []byte("*:*:*:*:filepw\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(servicefile, []byte("[prod]\npassword=filepw\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Built with net/url, like TestListConnectionFailure, so no literal
+	// URL with credentials sits in the source.
+	dbURL := func(user *url.Userinfo, host string, query url.Values) string {
+		u := url.URL{Scheme: "postgres", User: user, Host: host, Path: "/postgres", RawQuery: query.Encode()}
+		return u.String()
+	}
+	own := url.UserPassword("admin", "own")
+	const (
+		noPassword = "no password of its own"
+		otherKey   = "sets something other than"
+		pgEnv      = "set in your shell, and pgx would use that"
+		twoHosts   = "more than one host"
+	)
+	tests := []struct {
+		name     string
+		url      string
+		env      map[string]string
+		exported bool   // set in the shell rather than in .env
+		wantErr  string // "" for none
+		wantPW   string
+	}{
+		{name: "no password in .env, ~/.pgpass has one", url: dbURL(url.User("admin"), "other.example", nil), wantErr: noPassword},
+		{name: "password in .env", url: dbURL(own, "other.example", nil), wantPW: "own"},
+		{name: "PGPASSWORD in the shell", url: dbURL(url.User("admin"), "other.example", nil),
+			env: map[string]string{"PGPASSWORD": "admin-secret"}, wantErr: pgEnv},
+		{name: "PGHOST in the shell", url: dbURL(own, "other.example", nil),
+			env: map[string]string{"PGHOST": "prod.example"}, wantErr: pgEnv},
+		{name: "client certificate in the shell", url: dbURL(own, "other.example", nil),
+			env: map[string]string{"PGSSLCERT": "/x/client.crt", "PGSSLKEY": "/x/client.key"}, wantErr: pgEnv},
+		{name: "PGPASSFILE in the shell", url: dbURL(url.User("admin"), "other.example", nil),
+			env: map[string]string{"PGPASSFILE": passfile}, wantErr: pgEnv},
+		{name: "passfile in the URL", url: dbURL(url.User("admin"), "other.example", url.Values{"passfile": {passfile}}), wantErr: otherKey},
+		{name: "service in the URL", url: dbURL(url.User("admin"), "other.example", url.Values{"service": {"prod"}, "servicefile": {servicefile}}),
+			wantErr: otherKey},
+		{name: "service in keyword form", url: "host=other.example user=admin service=prod servicefile=" + servicefile,
+			wantErr: otherKey},
+		{name: "two hosts", url: dbURL(own, "localhost,other.example", nil), wantErr: twoHosts},
+		{name: "no password, exported", url: dbURL(url.User("admin"), "other.example", nil),
+			env: map[string]string{"PGPASSWORD": "admin-secret"}, exported: true, wantPW: "admin-secret"},
+		// Control: the same ~/.pgpass is read for an exported URL, so the
+		// first row's refusal isn't just a file pgx never looks at.
+		{name: "no password, exported, ~/.pgpass", url: dbURL(url.User("admin"), "other.example", nil), exported: true, wantPW: "filepw"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clearAllPGEnv(t)
+			t.Setenv("HOME", home)
+			for k, v := range tt.env {
+				t.Setenv(k, v)
+			}
+			fromDotenv = map[string]bool{}
+			if tt.exported {
+				t.Setenv("DATABASE_URL", tt.url)
+			} else {
+				writeDotenvURL(t, tt.url)
+			}
+
+			var notes bytes.Buffer
+			p := newPrompter(strings.NewReader(""), &notes) // any read would fail
+			cfg, err := connConfig(p)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("connConfig = %v, want an error containing %q", err, tt.wantErr)
+				}
+				if strings.Contains(err.Error(), "admin-secret") || strings.Contains(err.Error(), "filepw") {
+					t.Errorf("error leaks a password: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Password != tt.wantPW {
+				t.Errorf("password = %q, want %q", cfg.Password, tt.wantPW)
+			}
+			if fromFile := !tt.exported; fromFile != strings.Contains(notes.String(), "from .env: admin@other.example:5432/postgres") {
+				t.Errorf("notes = %q, want the .env host named only for a URL from .env", notes.String())
+			}
+			if _, set := os.LookupEnv("PGPASSFILE"); set {
+				t.Error("PGPASSFILE is still set after connConfig, want it restored (unset)")
+			}
+		})
+	}
+}
+
+// Value: protects=pgx's default client certificate in ~/.postgresql is never presented to a server a .env names; fails_when=dotenvConfig's client-certificate check goes; why_new=pgx loads ~/.postgresql/postgresql.crt and .key by default; seam=none
+func TestDotenvURLRefusesDefaultClientCertificate(t *testing.T) {
+	saved := fromDotenv
+	t.Cleanup(func() { fromDotenv = saved })
+	clearAllPGEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeClientCertificate(t, filepath.Join(home, ".postgresql"))
+	fromDotenv = map[string]bool{}
+	u := url.URL{Scheme: "postgres", User: url.UserPassword("admin", "own"), Host: "other.example", Path: "/postgres"}
+	writeDotenvURL(t, u.String())
+
+	_, err := connConfig(newPrompter(strings.NewReader(""), &bytes.Buffer{}))
+	if err == nil || !strings.Contains(err.Error(), "client certificate") {
+		t.Errorf("connConfig = %v, want a refusal naming the client certificate", err)
+	}
+}
+
+// clearAllPGEnv unsets every PG* variable and DATABASE_URL for this test.
+func clearAllPGEnv(t *testing.T) {
+	t.Helper()
+	clearConnEnv(t)
+	for _, kv := range os.Environ() {
+		if name, _, _ := strings.Cut(kv, "="); strings.HasPrefix(name, "PG") || name == "DATABASE_URL" {
+			t.Setenv(name, "") // restored afterwards
+			os.Unsetenv(name)
+		}
+	}
+}
+
+// writeDotenvURL loads DATABASE_URL=url from a .env file, as Run does.
+func writeDotenvURL(t *testing.T, dsn string) {
+	t.Helper()
+	env := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(env, []byte("DATABASE_URL="+dsn+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := loadDotenv(env, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// writeClientCertificate writes a self-signed postgresql.crt and .key to dir.
+func writeClientCertificate(t *testing.T, dir string) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "admin"},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour)}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name, block := range map[string]*pem.Block{
+		"postgresql.crt": {Type: "CERTIFICATE", Bytes: der},
+		"postgresql.key": {Type: "EC PRIVATE KEY", Bytes: keyDER},
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), pem.EncodeToMemory(block), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// Value: protects=error text, which can come from a hostile server, can't send terminal escapes; fails_when=fail prints err raw again; why_new=adversarial review; seam=none
+func TestFailEscapesControlCharacters(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{"plain\nsecond line\tok", "plain\n  second line\tok"}, // indented, so it can't pose as "nellie: ..."
+		{"bad \x1b[2J clear", `bad \x1b[2J clear`},
+		{"c1 \u009b csi", `c1 \u009b csi`},
+		{"invalid \xff byte", `invalid \xff byte`},
+		{"bidi \u202e flip", `bidi \u202e flip`},
+		{"umlaut ä stays", "umlaut ä stays"},
+	}
+	for _, tt := range tests {
+		var stderr bytes.Buffer
+		fail(&stderr, errors.New(tt.in))
+		if got, want := stderr.String(), "nellie: "+tt.want+"\n"; got != want {
+			t.Errorf("fail(%q) printed %q, want %q", tt.in, got, want)
+		}
+	}
+}
+
+// Value: protects=help works next to a broken .env, like --version; fails_when=help moves back after loadDotenv; why_new=Fable review #15; seam=none
+func TestHelpIgnoresBrokenDotenv(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("not a valid line\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	for _, arg := range []string{"help", "--help", "--version"} {
+		var stdout, stderr bytes.Buffer
+		if code := Run([]string{arg}, strings.NewReader(""), &stdout, &stderr); code != exitOK || stdout.Len() == 0 {
+			t.Errorf("%s: exit %d, stdout %q, stderr %q; want exit 0 and output", arg, code, stdout.String(), stderr.String())
+		}
+	}
+}
+
+// Value: protects=piped rotate-password refuses a DATABASE_URL from .env, so a script's secret never goes to a server a checked-out .env chose; fails_when=the fromDotenv check in rotatePassword goes; why_new=Fable review #5; seam=none
+func TestRotatePipedRefusesDotenvURL(t *testing.T) {
+	saved := fromDotenv
+	t.Cleanup(func() { fromDotenv = saved })
+	clearAllPGEnv(t)
+	fromDotenv = map[string]bool{}
+	u := url.URL{Scheme: "postgres", User: url.UserPassword("admin", "own"), Host: "other.example", Path: "/postgres"}
+	writeDotenvURL(t, u.String())
+
+	var stdout, stderr bytes.Buffer
+	code := rotatePassword([]string{"shop_app"}, strings.NewReader("new-secret-from-a-vault\n"), &stdout, &stderr)
+	if code != exitUsage || !strings.Contains(stderr.String(), "not .env") || stdout.Len() != 0 {
+		t.Errorf("exit %d, stdout %q, stderr %q; want exit 2 and a refusal naming .env", code, stdout.String(), stderr.String())
 	}
 }

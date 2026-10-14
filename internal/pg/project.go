@@ -61,10 +61,22 @@ func CreateProject(ctx context.Context, cfg *pgx.ConnConfig, p Project, password
 	}
 	defer admin.Close(context.Background())
 
+	// The name checks read catalogs and use operators (||, =, >) by
+	// unqualified name: pin search_path and refuse a switched role first, as
+	// every command does.
+	if err := pinSession(ctx, admin); err != nil {
+		return err
+	}
 	if err := checkServerVersion(ctx, admin); err != nil {
 		return err
 	}
+	if err := lockAdd(ctx, admin); err != nil {
+		return err
+	}
 	if err := checkNamesFree(ctx, admin, []string{p.Name}, []string{p.Name}); err != nil {
+		return err
+	}
+	if err := checkProjectNameUnambiguous(ctx, admin, p.Name); err != nil {
 		return err
 	}
 

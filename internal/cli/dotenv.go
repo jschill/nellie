@@ -10,15 +10,17 @@ import (
 	"strings"
 )
 
-// loadDotenv sets environment variables from a .env-style file, like Node's
-// dotenv. Variables that are already set win, so a one-off
+// loadDotenv sets DATABASE_URL from a .env-style file, like Node's dotenv. A
+// DATABASE_URL that's already set wins, so a one-off
 // `DATABASE_URL=... nellie add-project` still overrides the file. A missing
 // file isn't an error.
 //
-// Connection-target keys (PG*) and TLS trust keys (SSL_CERT_*) are never taken
-// from the file: a .env in a checked-out repo could otherwise point nellie at
-// another host while the admin password is in the environment. They're skipped
-// with a warning that names the key. Set them in your shell instead.
+// Every other key is skipped with a warning that names it. A .env in a
+// checked-out repo isn't trusted: PG* keys could point nellie at another
+// host while the admin password is in the environment, and keys like
+// GODEBUG or SSL_CERT_FILE change how Go resolves names and checks TLS. For
+// the same reason a DATABASE_URL from the file must carry its own password,
+// and can't sit next to PG* settings from the shell (see connConfig).
 func loadDotenv(path string, warn io.Writer) error {
 	f, err := os.Open(path)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -34,21 +36,21 @@ func loadDotenv(path string, warn io.Writer) error {
 		return fmt.Errorf("%s: %w", path, err)
 	}
 	for _, v := range vars {
-		if fileMayNotSet(v.key) {
-			fmt.Fprintf(warn, "nellie: ignoring %s in .env; set it in your shell instead\n", v.key)
+		if v.key != "DATABASE_URL" {
+			fmt.Fprintf(warn, "nellie: ignoring %s in .env, which only sets DATABASE_URL; set it in your shell instead\n", printable(v.key))
 			continue
 		}
 		if _, set := os.LookupEnv(v.key); !set {
 			os.Setenv(v.key, v.value)
+			fromDotenv[v.key] = true
 		}
 	}
 	return nil
 }
 
-// fileMayNotSet reports whether key must come from the environment, not .env.
-func fileMayNotSet(key string) bool {
-	return strings.HasPrefix(key, "PG") || strings.HasPrefix(key, "SSL_CERT_")
-}
+// fromDotenv records the keys loadDotenv set in this process, so connConfig
+// can tell a DATABASE_URL from a checked-out .env from one the user exported.
+var fromDotenv = map[string]bool{}
 
 type envVar struct{ key, value string }
 
@@ -59,7 +61,13 @@ func parseDotenv(r io.Reader) ([]envVar, error) {
 	var vars []envVar
 	sc := bufio.NewScanner(r)
 	for n := 1; sc.Scan(); n++ {
-		line := strings.TrimSpace(sc.Text())
+		line := sc.Text()
+		if n == 1 {
+			// Some editors start the file with a byte order mark, which
+			// TrimSpace keeps; it would end up in the first key.
+			line = strings.TrimPrefix(line, "\ufeff")
+		}
+		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}

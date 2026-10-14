@@ -26,6 +26,16 @@ const (
 	adminSuffix = "admin"
 )
 
+// String names the kind as nellie list shows it, also in --json, so the
+// names are a stable interface. Having a String method makes UserKind a
+// fmt.Stringer, so %s and %v print these names instead of 0 and 1.
+func (k UserKind) String() string {
+	if k == AdminUser {
+		return "admin"
+	}
+	return "application"
+}
+
 // DefaultSuffix suggests what comes after "<project>_" in the user's name.
 func (k UserKind) DefaultSuffix() string {
 	if k == AdminUser {
@@ -103,6 +113,17 @@ func AddUser(ctx context.Context, cfg *pgx.ConnConfig, u User, password string) 
 	}
 	defer admin.Close(context.Background())
 
+	// The name checks read catalogs and use operators (||, =, >) by
+	// unqualified name: pin search_path and refuse a switched role first, as
+	// list and rotate-password do. AddUser's second connection, to the
+	// project database, isn't pinned: its GRANT and ALTER DEFAULT PRIVILEGES
+	// statements evaluate nothing search_path could change. The database's
+	// owner can switch that session's role, but only to the owner or a role
+	// that can act as it, which grants the same; any other role makes ALTER
+	// DEFAULT PRIVILEGES FOR ROLE <owner> fail and the grants roll back.
+	if err := pinSession(ctx, admin); err != nil {
+		return err
+	}
 	if err := checkServerVersion(ctx, admin); err != nil {
 		return err
 	}
@@ -110,7 +131,13 @@ func AddUser(ctx context.Context, cfg *pgx.ConnConfig, u User, password string) 
 	if err != nil {
 		return err
 	}
+	if err := lockAdd(ctx, admin); err != nil {
+		return err
+	}
 	if err := checkNamesFree(ctx, admin, nil, []string{u.Name}); err != nil {
+		return err
+	}
+	if err := checkUserNameUnambiguous(ctx, admin, u.Name, u.Project); err != nil {
 		return err
 	}
 	plan := u.Plan(owner, verifier)
@@ -150,19 +177,38 @@ func AddUser(ctx context.Context, cfg *pgx.ConnConfig, u User, password string) 
 // admin role can act as it, which the grants in AddUser need.
 func projectOwner(ctx context.Context, conn *pgx.Conn, db string) (string, error) {
 	var owner string
-	var canAct bool
-	err := conn.QueryRow(ctx,
-		"SELECT pg_get_userbyid(datdba), pg_has_role(datdba, 'USAGE') FROM pg_database WHERE datname = $1",
+	var canAct, member, pg16 bool
+	// "Member" here means one that could SET ROLE to the owner. On Postgres
+	// 16+ that's the SET privilege: MEMBER also matches the ADMIN-only
+	// membership a CREATEROLE admin keeps in every role it created, and 'SET'
+	// isn't known to Postgres 15, where MEMBER is right.
+	err := conn.QueryRow(ctx, `
+		SELECT pg_get_userbyid(datdba), pg_has_role(datdba, 'USAGE'),
+			pg_has_role(datdba, CASE WHEN v.pg16 THEN 'SET' ELSE 'MEMBER' END), v.pg16
+		FROM pg_database,
+			(SELECT current_setting('server_version_num')::int >= 160000 AS pg16) v
+		WHERE datname = $1`,
 		db,
-	).Scan(&owner, &canAct)
+	).Scan(&owner, &canAct, &member, &pg16)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", fmt.Errorf("database %s %w", db, ErrNotFound)
 	}
 	if err != nil {
 		return "", fmt.Errorf("looking up database %s: %w", db, err)
 	}
+	if !canAct && member {
+		// A NOINHERIT admin, or on Postgres 16+ a grant WITH INHERIT FALSE:
+		// nellie list leaves these databases out for the same reason. Each
+		// grant has its own INHERIT option only since 16.
+		fix := "make the admin role INHERIT (ALTER ROLE ... INHERIT)"
+		if pg16 {
+			fix = "grant the membership again WITH INHERIT TRUE"
+		}
+		return "", fmt.Errorf("can't grant access to database %q: the admin role is a member of its owner %q but doesn't "+
+			"inherit its privileges (NOINHERIT, or a grant WITH INHERIT FALSE); %s", db, owner, fix)
+	}
 	if !canAct {
-		return "", fmt.Errorf("can't grant access to database %s: the admin role isn't a member of its owner %s "+
+		return "", fmt.Errorf("can't grant access to database %s: the admin role isn't a member of its owner %q "+
 			"(projects made by nellie add-project are set up for this)", db, owner)
 	}
 	return owner, nil

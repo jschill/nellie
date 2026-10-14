@@ -3,7 +3,9 @@
 package cli
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -12,8 +14,12 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"slices"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf16"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -39,12 +45,14 @@ Commands:
   add-project       create a database and a role with the same name that owns it
   add-user          add a user to a project: application (reads and writes) or admin
   rotate-password   give a user a new password
+  list              list projects and their users (also: trumpet)
 
 Run "nellie <command> -h" for a command's flags.
 Run "nellie --version" for the version.
 `
 
-// dryRunNote heads every --dry-run script. The password is redacted, so piping
+// dryRunNote heads every --dry-run script that sets a password (list prints
+// its own header, having none). The password is redacted, so piping
 // the script to psql would create a role whose password is the text "<redacted>".
 const dryRunNote = "-- dry run: the password is redacted, so this script is not meant to be run as is\n"
 
@@ -78,10 +86,13 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprint(stderr, usage)
 		return exitUsage
 	}
-	// Before .env is read, so a broken .env can't block it.
+	// Before .env is read, so a broken .env can't block them.
 	switch args[0] {
 	case "version", "-version", "--version":
 		fmt.Fprintf(stdout, "nellie %s\n", Version)
+		return exitOK
+	case "help", "-h", "-help", "--help":
+		fmt.Fprint(stdout, usage)
 		return exitOK
 	}
 	if err := loadDotenv(".env", stderr); err != nil {
@@ -95,9 +106,8 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return addUser(args[1:], stdin, stdout, stderr)
 	case "rotate-password":
 		return rotatePassword(args[1:], stdin, stdout, stderr)
-	case "help", "-h", "-help", "--help":
-		fmt.Fprint(stdout, usage)
-		return exitOK
+	case "list", "trumpet":
+		return list(args[1:], stdin, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "nellie: unknown command %q\n\n%s", args[0], usage)
 		return exitUsage
@@ -105,14 +115,17 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 }
 
 // connConfig resolves the admin connection: $DATABASE_URL, then the standard
-// PG* environment variables, then asking. Whatever pgx gets, it also reads
-// ~/.pgpass, like psql.
+// PG* environment variables, then asking. pgx also reads ~/.pgpass, like
+// psql, except for a DATABASE_URL from .env (see dotenvConfig).
 //
 // There is deliberately no --dsn flag: a connection string on the command line
 // would carry the admin password into shell history and the process list.
 func connConfig(p *prompter) (*pgx.ConnConfig, error) {
 	if dsn := os.Getenv("DATABASE_URL"); dsn != "" || hasPGEnv() {
-		return parseAdmin(dsn)
+		if dsn == "" || !fromDotenv["DATABASE_URL"] {
+			return parseAdmin(dsn)
+		}
+		return dotenvConfig(p, dsn)
 	}
 
 	for {
@@ -128,6 +141,99 @@ func connConfig(p *prompter) (*pgx.ConnConfig, error) {
 		}
 		fmt.Fprintln(p.out, err)
 	}
+}
+
+// dotenvConfig resolves a DATABASE_URL from .env, which a checked-out repo
+// may have chosen. pgx would mix in every PG* variable from the shell (a
+// client certificate, sslmode, a password), so the two never combine; the URL
+// must carry its own password and name one host, and nellie says which.
+func dotenvConfig(p *prompter, dsn string) (*pgx.ConnConfig, error) {
+	if names := pgEnvNames(); len(names) > 0 {
+		verb := "is"
+		if len(names) > 1 {
+			verb = "are"
+		}
+		return nil, fmt.Errorf("DATABASE_URL comes from .env, but %s %s set in your shell, and pgx would use that "+
+			"for whatever server .env names; unset one of them", strings.Join(names, ", "), verb)
+	}
+	if err := requireOwnPassword(dsn); err != nil {
+		return nil, err
+	}
+	cfg, err := parseAdmin(dsn)
+	if err != nil {
+		return nil, err
+	}
+	targets := append([]*pgconn.FallbackConfig{{Host: cfg.Host, Port: cfg.Port, TLSConfig: cfg.TLSConfig}}, cfg.Fallbacks...)
+	for _, t := range targets {
+		if t.Host != cfg.Host || t.Port != cfg.Port {
+			return nil, errors.New("the DATABASE_URL in .env names more than one host; " +
+				"nellie only shows one, so give it a single host, or set DATABASE_URL in your shell")
+		}
+		// pgx loads ~/.postgresql/postgresql.crt and .key by default, and
+		// would present them to the server .env names.
+		if t.TLSConfig != nil && (len(t.TLSConfig.Certificates) > 0 || t.TLSConfig.GetClientCertificate != nil) {
+			return nil, errors.New("a client certificate from ~/.postgresql would be sent to the server the DATABASE_URL " +
+				"in .env names; set DATABASE_URL in your shell instead")
+		}
+	}
+	fmt.Fprintf(p.out, "nellie: using DATABASE_URL from .env: %s@%s:%d/%s\n",
+		printable(cfg.User), printable(cfg.Host), cfg.Port, printable(cfg.Database))
+	return cfg, nil
+}
+
+// pgEnvNames returns the PG* variables set in the environment, sorted.
+func pgEnvNames() []string {
+	var names []string
+	for _, kv := range os.Environ() {
+		name, value, _ := strings.Cut(kv, "=")
+		if strings.HasPrefix(name, "PG") && value != "" {
+			names = append(names, name)
+		}
+	}
+	slices.Sort(names)
+	return names
+}
+
+// dotenvURLKeys are the only settings a DATABASE_URL from .env may contain.
+// Anything else could make pgx read a file the URL names (passfile, service,
+// servicefile, sslkey, ...) and send what it finds to the URL's host.
+var dotenvURLKeys = []string{"host", "port", "user", "password", "dbname", "sslmode", "connect_timeout"}
+
+// requireOwnPassword refuses a connection string without a password of its
+// own. It's for a DATABASE_URL from .env, which a checked-out repo controls:
+// pgx would fill a missing password in from a passfile or a service file and
+// send the admin password to whatever host the URL names. The default files
+// are hidden while pgx parses, and ConnStringAllowedKeys rejects the URL's
+// own (passfile=, service=, ...) before pgx reads any file.
+func requireOwnPassword(dsn string) error {
+	// No PG* variable is set (see dotenvConfig), but pgx still falls back
+	// to ~/.pgpass and ~/.pg_service.conf by default.
+	hidden := map[string]string{"PGPASSFILE": os.DevNull, "PGSERVICEFILE": os.DevNull}
+	for key, value := range hidden {
+		old, had := os.LookupEnv(key)
+		os.Setenv(key, value)
+		defer func() {
+			if had {
+				os.Setenv(key, old)
+			} else {
+				os.Unsetenv(key)
+			}
+		}()
+	}
+	cfg, err := pgx.ParseConfigWithOptions(dsn, pgx.ParseConfigOptions{
+		ParseConfigOptions: pgconn.ParseConfigOptions{ConnStringAllowedKeys: dotenvURLKeys},
+	})
+	if err != nil {
+		// pgx's message can echo the URL, so it's not shown (see errBadURL).
+		return fmt.Errorf("the DATABASE_URL in .env isn't valid, or sets something other than %s; "+
+			"set it in your shell instead if it needs more", strings.Join(dotenvURLKeys, ", "))
+	}
+	if cfg.Password == "" {
+		return errors.New("the DATABASE_URL in .env has no password of its own, and nellie won't fill one in from " +
+			"~/.pgpass or a service file for a URL a checked-out .env can point anywhere; " +
+			"put the password in that URL, or set DATABASE_URL in your shell instead")
+	}
+	return nil
 }
 
 // errBadURL is what the user sees when pgx can't read the connection settings.
@@ -290,14 +396,37 @@ func parseFlags(cmd command, args []string, stderr io.Writer) (opts options, cod
 func fail(stderr io.Writer, err error) int {
 	if errors.Is(err, errInterrupted) || errors.Is(err, context.Canceled) {
 		if errors.Is(err, pg.ErrCleanupFailed) {
-			fmt.Fprintf(stderr, "nellie: interrupted: %v\n", err)
+			fmt.Fprintf(stderr, "nellie: interrupted: %s\n", terminalSafe(err.Error()))
 		} else {
 			fmt.Fprintln(stderr, "nellie: interrupted")
 		}
 		return exitInterrupted
 	}
-	fmt.Fprintf(stderr, "nellie: %v\n", err)
+	fmt.Fprintf(stderr, "nellie: %s\n", terminalSafe(err.Error()))
 	return exitError
+}
+
+// terminalSafe escapes what a terminal would interpret in s: control
+// characters other than newline and tab, other non-printing runes, and
+// invalid UTF-8. Error text can come from the server, which could otherwise
+// send escape sequences to the user's terminal.
+func terminalSafe(s string) string {
+	var b strings.Builder
+	for len(s) > 0 {
+		r, size := utf8.DecodeRuneInString(s)
+		switch {
+		case r == utf8.RuneError && size == 1:
+			fmt.Fprintf(&b, `\x%02x`, s[0])
+		case r != '\n' && r != '\t' && !unicode.IsPrint(r):
+			q := strconv.QuoteRune(r)
+			b.WriteString(q[1 : len(q)-1])
+		default:
+			b.WriteString(s[:size])
+		}
+		s = s[size:]
+	}
+	// A server could otherwise start a line that looks like nellie's own.
+	return strings.ReplaceAll(b.String(), "\n", "\n  ")
 }
 
 // connURL builds a connection string for a project role on the same server
@@ -325,4 +454,29 @@ func connURL(cfg *pgx.ConnConfig, user, password, db string) string {
 	}
 	u.RawQuery = query.Encode()
 	return u.String()
+}
+
+// writeJSON encodes v as indented JSON into w, with every non-printing
+// character escaped as \uXXXX. encoding/json already escapes ASCII control
+// characters, but not, say, U+009B (a terminal's CSI) or U+202E (which
+// reverses text), and --json output often ends up on a terminal via jq.
+func writeJSON(w *bytes.Buffer, v any) {
+	var raw bytes.Buffer
+	enc := json.NewEncoder(&raw)
+	enc.SetIndent("", "  ")
+	enc.Encode(v) // can't fail: only strings, bools and slices of them, written to memory
+	for s := raw.String(); len(s) > 0; {
+		r, size := utf8.DecodeRuneInString(s)
+		if r >= utf8.RuneSelf && !unicode.IsPrint(r) {
+			// Only inside strings: JSON outside them is plain ASCII.
+			if r1, r2 := utf16.EncodeRune(r); r1 != utf8.RuneError {
+				fmt.Fprintf(w, `\u%04x\u%04x`, r1, r2)
+			} else {
+				fmt.Fprintf(w, `\u%04x`, r)
+			}
+		} else {
+			w.WriteString(s[:size])
+		}
+		s = s[size:]
+	}
 }

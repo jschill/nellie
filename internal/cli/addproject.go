@@ -46,6 +46,7 @@ func addProject(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	defer stop()
 
 	password := pg.NewPassword()
+	pg.LockWait = func() { fmt.Fprintln(stderr, "nellie: waiting for another nellie run to finish (Ctrl-C to stop)") }
 	if err := pg.CreateProject(ctx, cfg, project, password); err != nil {
 		return fail(stderr, err)
 	}

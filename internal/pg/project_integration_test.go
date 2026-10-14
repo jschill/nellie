@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -68,6 +69,7 @@ func sweep(dsn string) {
 			}
 		}
 		exec("GRANT " + ident(d.owner) + " TO " + ident(me))
+		exec("ALTER DATABASE " + ident(d.db) + " IS_TEMPLATE false") // a template can't be dropped
 		exec("DROP DATABASE IF EXISTS " + ident(d.db))
 	}
 
@@ -471,7 +473,7 @@ func TestAddUserNeedsMembershipInOwner(t *testing.T) {
 	if err == nil {
 		t.Fatal("AddUser succeeded for a database whose owner the admin isn't a member of")
 	}
-	if !strings.Contains(err.Error(), "isn't a member of its owner "+owner) {
+	if !strings.Contains(err.Error(), "isn't a member of its owner "+strconv.Quote(owner)) {
 		t.Errorf("unexpected error: %v", err)
 	}
 

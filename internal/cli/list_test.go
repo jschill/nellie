@@ -1,0 +1,197 @@
+package cli
+
+import (
+	"bytes"
+	"encoding/json"
+	"net/url"
+	"strings"
+	"testing"
+
+	"github.com/jschill/nellie/internal/pg"
+)
+
+// Value: protects=--dry-run prints the search_path pin and the exact query, needs no connection, under both names; fails_when=the alias is dropped, the pin is left out, or the dry run connects; why_new=new code; seam=none
+func TestListDryRun(t *testing.T) {
+	clearConnEnv(t)
+	for _, name := range []string{"list", "trumpet"} {
+		t.Run(name, func(t *testing.T) {
+			// Empty stdin: if it asked for the connection, it would fail.
+			var stdout, stderr bytes.Buffer
+			if code := Run([]string{name, "--dry-run"}, strings.NewReader(""), &stdout, &stderr); code != exitOK {
+				t.Fatalf("exit code %d, stderr:\n%s", code, stderr.String())
+			}
+			// The search_path pin first: without it the query can run a
+			// function the database's owner planted (TestListProjectsIgnoresShadowedFunctions).
+			if !strings.Contains(stdout.String(), "SET search_path = pg_catalog, pg_temp;\n"+pg.ListSQL+";\n") {
+				t.Errorf("dry run doesn't print the search_path pin and the query:\n%s", stdout.String())
+			}
+		})
+	}
+}
+
+// Value: protects=usage errors exit 2 before any prompt; fails_when=list accepts an argument or combines --json with --dry-run; why_new=new code; seam=none
+func TestListUsageErrors(t *testing.T) {
+	clearConnEnv(t)
+	for _, args := range [][]string{
+		{"list", "shop"},
+		{"list", "--json", "--dry-run"},
+	} {
+		var stdout, stderr bytes.Buffer
+		if code := Run(args, strings.NewReader(""), &stdout, &stderr); code != exitUsage {
+			t.Errorf("%v: exit code %d, want %d; stderr:\n%s", args, code, exitUsage, stderr.String())
+		}
+	}
+}
+
+// Value: protects=the human output aligns users and their notes (also across a user without notes), shows powers and expiry, says when there are no users, and escapes control characters; fails_when=the layout changes, an empty note column adds trailing spaces, or a raw escape sequence reaches the terminal; why_new=new code; seam=none
+func TestPrintList(t *testing.T) {
+	var out bytes.Buffer
+	printList(&out, []pg.ProjectInfo{
+		{Name: "blog", Owner: "blog", Template: true},
+		{Name: "shop", Owner: "alice", OwnerPowers: []string{"CREATEDB", "owner of blog"}, ForeignOwner: true, Users: []pg.UserInfo{
+			{Name: "shop_app", Kind: pg.AppUser, CanConnect: true, Expired: true},
+			{Name: "shop_admin", Kind: pg.AdminUser, CanConnect: true},
+			{Name: "shop_boss", Kind: pg.AdminUser, Powers: []string{"CREATEROLE", "member of pg_monitor"}, Expired: true},
+			{Name: "shop_\x1b[2J", Kind: pg.AppUser, CanConnect: true},
+			{Name: "shop_v2_app", Kind: pg.AppUser, BelongsTo: "shop_v2"},
+		}},
+	})
+	want := `blog  (owner blog; template: any CREATEDB role can copy it)
+  no users yet; add one with "nellie add-user"
+
+shop  (owner alice; privileged: CREATEDB, owner of blog; owner isn't named after the database)
+  shop_app        application  password expired (VALID UNTIL)
+  shop_admin      admin
+  shop_boss       privileged   CREATEROLE, member of pg_monitor; can't connect; password expired (VALID UNTIL)
+  "shop_\x1b[2J"  application
+  shop_v2_app     application  belongs to database shop_v2; can't connect
+`
+	if out.String() != want {
+		t.Errorf("got:\n%s\nwant:\n%s", out.String(), want)
+	}
+
+	out.Reset()
+	printList(&out, nil)
+	if !strings.Contains(out.String(), "nellie add-project") {
+		t.Errorf("no hint for an empty list:\n%s", out.String())
+	}
+}
+
+// Value: protects=the --json shape scripts rely on: field names, the three type names, powers as arrays (a ", " in a name stays in one element), [] not null; fails_when=a tag or type name changes, privileged loses to the kind, or a nil slice reaches the encoder; why_new=new code; seam=none
+func TestListJSON(t *testing.T) {
+	tests := []struct {
+		name     string
+		projects []pg.ProjectInfo
+		want     string
+	}{
+		{"no projects", nil, `[]`},
+		{"no users", []pg.ProjectInfo{{Name: "blog", Owner: "blog"}}, `[{"project":"blog","owner":"blog","owner_powers":[],"template":false,"foreign_owner":false,"users":[]}]`},
+		{"project flags", []pg.ProjectInfo{{Name: "blog", Owner: "alice", OwnerPowers: []string{"CREATEDB"}, Template: true}},
+			`[{"project":"blog","owner":"alice","owner_powers":["CREATEDB"],"template":true,"foreign_owner":false,"users":[]}]`},
+		{"users", []pg.ProjectInfo{{Name: "shop", Owner: "shop", Users: []pg.UserInfo{
+			{Name: "shop_admin", Kind: pg.AdminUser},
+			{Name: "shop_app", Kind: pg.AppUser, CanConnect: true, Expired: true},
+			{Name: "shop_boss", Kind: pg.AdminUser, Powers: []string{"CREATEROLE", "member of x, y"}, BelongsTo: "shop_boss"},
+		}}}, `[{"project":"shop","owner":"shop","owner_powers":[],"template":false,"foreign_owner":false,"users":[` +
+			`{"name":"shop_admin","type":"admin","admin":true,"powers":[],"belongs_to":"","can_connect":false,"expired":false},` +
+			`{"name":"shop_app","type":"application","admin":false,"powers":[],"belongs_to":"","can_connect":true,"expired":true},` +
+			`{"name":"shop_boss","type":"privileged","admin":true,"powers":["CREATEROLE","member of x, y"],"belongs_to":"shop_boss","can_connect":false,"expired":false}]}]`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := json.Marshal(listJSON(tt.projects))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != tt.want {
+				t.Errorf("got  %s\nwant %s", got, tt.want)
+			}
+		})
+	}
+}
+
+// Value: protects=no project, owner or user name reaches the terminal with raw control or bidi characters, whichever column it is in; fails_when=printable() is dropped from a column, powersNote or the belongs-to note; why_new=TestPrintList only puts the escape in a user name; seam=none
+func TestPrintListEscapesEveryName(t *testing.T) {
+	// ESC (clears the screen), a newline (forges a line) and U+202E (reverses text).
+	hostile := "x\x1b[2J\n" + string(rune(0x202e))
+	// The escaped form, whether the name is quoted alone or inside a power.
+	escaped := `x\x1b[2J\n\` + `u202e`
+	tests := []struct {
+		name    string
+		project pg.ProjectInfo
+	}{
+		{"project", pg.ProjectInfo{Name: hostile, Owner: "o"}},
+		{"owner", pg.ProjectInfo{Name: "p", Owner: hostile}},
+		{"user", pg.ProjectInfo{Name: "p", Owner: "o", Users: []pg.UserInfo{{Name: hostile}}}},
+		{"user powers", pg.ProjectInfo{Name: "p", Owner: "o", Users: []pg.UserInfo{{Name: "p_u", Powers: []string{"owner of " + hostile}}}}},
+		{"owner powers", pg.ProjectInfo{Name: "p", Owner: "o", OwnerPowers: []string{"member of " + hostile}}},
+		{"belongs to", pg.ProjectInfo{Name: "p", Owner: "o", Users: []pg.UserInfo{{Name: "p_u", BelongsTo: hostile}}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var out bytes.Buffer
+			printList(&out, []pg.ProjectInfo{tt.project})
+			got := out.String()
+			if strings.ContainsAny(got, "\x1b"+string(rune(0x202e))) || strings.Contains(got, "[2J\n") {
+				t.Errorf("raw control characters in the output: %q", got)
+			}
+			if !strings.Contains(got, escaped) {
+				t.Errorf("output lacks the escaped name %s: %q", escaped, got)
+			}
+		})
+	}
+}
+
+// Value: protects=an unreachable server is exit 1 with the error on stderr, never an empty list on stdout, and the admin password isn't echoed; fails_when=the ListProjects error is dropped and list prints "The big top is empty" with exit 0; why_new=only dry runs and usage errors reach list(); seam=none
+func TestListConnectionFailure(t *testing.T) {
+	clearConnEnv(t)
+	const secret = "S3cr3tPW"
+	// Port 1 on loopback: nothing listens there, so the connection is refused at once.
+	// Built with net/url, so no literal user:password@ URL sits in the source.
+	u := url.URL{Scheme: "postgres", User: url.UserPassword("admin", secret), Host: "127.0.0.1:1",
+		Path: "/postgres", RawQuery: "sslmode=disable&connect_timeout=5"}
+	t.Setenv("DATABASE_URL", u.String())
+	for _, args := range [][]string{{"list"}, {"list", "--json"}} {
+		var stdout, stderr bytes.Buffer
+		if code := Run(args, strings.NewReader(""), &stdout, &stderr); code != exitError {
+			t.Errorf("%v: exit code %d, want %d; stderr:\n%s", args, code, exitError, stderr.String())
+		}
+		if stdout.Len() > 0 {
+			t.Errorf("%v: stdout should be empty when nothing was listed:\n%s", args, stdout.String())
+		}
+		if !strings.Contains(stderr.String(), "connecting") || strings.Contains(stderr.String(), secret) {
+			t.Errorf("%v: want a connection error without the password, stderr:\n%s", args, stderr.String())
+		}
+	}
+}
+
+// Value: protects=names that aren't valid UTF-8, such as a raw 8-bit CSI byte, are quoted rather than sent to the terminal; fails_when=printable only checks decoded runes, which turn bad bytes into a printable U+FFFD; why_new=only valid UTF-8 was tested; seam=none
+func TestPrintable(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{"shop_app", "shop_app"},
+		{"smörgås", "smörgås"},
+		{"a\x9bb", `"a\x9bb"`},
+		{"a\xffb", `"a\xffb"`},
+	}
+	for _, tt := range tests {
+		if got := printable(tt.in); got != tt.want {
+			t.Errorf("printable(%q) = %s, want %s", tt.in, got, tt.want)
+		}
+	}
+}
+
+// Value: protects=--json escapes non-printing characters that encoding/json leaves raw, such as a C1 CSI or a bidi override in a role name; fails_when=list or rotate-password goes back to a plain json.Encoder; why_new=Fable review #8; seam=none
+func TestWriteJSONEscapesNonPrinting(t *testing.T) {
+	var out bytes.Buffer
+	writeJSON(&out, []string{"a\u009bb", "c\u202ed", "umlaut ä", "emoji \U0001F418", "tab\tx"})
+	got := out.String()
+	for _, want := range []string{`a\u009bb`, `c\u202ed`, "umlaut ä", "emoji \U0001F418", `tab\tx`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("output %q lacks %q", got, want)
+		}
+	}
+	var back []string
+	if err := json.Unmarshal(out.Bytes(), &back); err != nil || back[0] != "a\u009bb" || back[1] != "c\u202ed" {
+		t.Errorf("round trip: %q, %v", back, err)
+	}
+}

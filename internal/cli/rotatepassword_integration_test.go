@@ -10,6 +10,7 @@ import (
 	"errors"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -59,8 +60,13 @@ func TestRotatePasswordCommand(t *testing.T) {
 	base := "nellie_cli_it_" + strings.ToLower(rand.Text()[:8])
 	project := base + "_v2"
 	user := project + "_app"
+	// Each owned by the role named after it, as nellie's projects are: only
+	// those get a URL.
 	for _, db := range []string{base, project} {
-		exec("CREATE DATABASE " + pgx.Identifier{db}.Sanitize())
+		id := pgx.Identifier{db}.Sanitize()
+		exec("CREATE ROLE " + id + " NOLOGIN")
+		exec("GRANT " + id + " TO " + pgx.Identifier{adminCfg.User}.Sanitize())
+		exec("CREATE DATABASE " + id + " OWNER " + id)
 	}
 	exec("CREATE ROLE " + pgx.Identifier{user}.Sanitize() + " LOGIN")
 	t.Cleanup(func() {
@@ -68,12 +74,14 @@ func TestRotatePasswordCommand(t *testing.T) {
 			"DROP ROLE IF EXISTS " + pgx.Identifier{user}.Sanitize(),
 			"DROP DATABASE IF EXISTS " + pgx.Identifier{project}.Sanitize(),
 			"DROP DATABASE IF EXISTS " + pgx.Identifier{base}.Sanitize(),
+			"DROP ROLE IF EXISTS " + pgx.Identifier{project}.Sanitize(),
+			"DROP ROLE IF EXISTS " + pgx.Identifier{base}.Sanitize(),
 		} {
 			admin.Exec(context.Background(), sql)
 		}
 	})
 
-	// orphan has no project database at all.
+	// orphan isn't in any project, so rotate-password refuses it.
 	orphan := "nellie_cli_it_orphan_" + strings.ToLower(rand.Text()[:8])
 	exec("CREATE ROLE " + pgx.Identifier{orphan}.Sanitize() + " LOGIN")
 	t.Cleanup(func() { admin.Exec(context.Background(), "DROP ROLE IF EXISTS "+pgx.Identifier{orphan}.Sanitize()) })
@@ -103,26 +111,40 @@ func TestRotatePasswordCommand(t *testing.T) {
 		return out.String(), errOut.String()
 	}
 
-	t.Run("generated, json", func(t *testing.T) {
-		out, _ := run(t, "", user, "--json", "--generate")
-		var res map[string]string
+	// decode reads rotate-password's --json output, as a result and as raw
+	// fields (to tell a missing field from an empty one).
+	decode := func(t *testing.T, out string) (rotateResult, map[string]json.RawMessage) {
+		t.Helper()
+		var res rotateResult
+		var raw map[string]json.RawMessage
 		if err := json.Unmarshal([]byte(out), &res); err != nil {
 			t.Fatalf("stdout isn't JSON: %v\n%s", err, out)
 		}
-		if res["user"] != user || res["database"] != project {
-			t.Errorf("user = %q, database = %q; want %q and the longest project %q", res["user"], res["database"], user, project)
+		json.Unmarshal([]byte(out), &raw)
+		return res, raw
+	}
+
+	t.Run("generated, json", func(t *testing.T) {
+		out, _ := run(t, "", user, "--json", "--generate")
+		res, raw := decode(t, out)
+		if res.User != user || res.Database != project {
+			t.Errorf("user = %q, database = %q; want %q and the longest project %q", res.User, res.Database, user, project)
 		}
-		if len(res["password"]) != 26 {
-			t.Fatalf("password = %q, want a 26-character generated one", res["password"])
+		if len(res.Password) != 26 {
+			t.Fatalf("password = %q, want a 26-character generated one", res.Password)
 		}
-		got, err := pgx.ParseConfig(res["url"])
+		got, err := pgx.ParseConfig(res.URL)
 		if err != nil {
 			t.Fatalf("url doesn't parse: %v", err)
 		}
-		if got.User != user || got.Password != res["password"] || got.Database != project {
-			t.Errorf("url = %s, want user %s, the generated password and database %s", res["url"], user, project)
+		if got.User != user || got.Password != res.Password || got.Database != project {
+			t.Errorf("url = %s, want user %s, the generated password and database %s", res.URL, user, project)
 		}
-		canLogIn(t, user, res["password"], project)
+		// Value: protects=the warning fields are always present for scripts, [] not null for no powers; fails_when=a field gets omitempty or a nil slice; why_new=new fields; seam=none
+		if string(raw["powers"]) != "[]" || string(raw["expired"]) != "false" || string(raw["template"]) != "false" {
+			t.Errorf("warning fields = powers %s, expired %s, template %s; want [], false, false", raw["powers"], raw["expired"], raw["template"])
+		}
+		canLogIn(t, user, res.Password, project)
 	})
 
 	const typed = "  correct horse battery staple  "
@@ -158,9 +180,46 @@ func TestRotatePasswordCommand(t *testing.T) {
 		}
 	})
 
-	// Value: protects=an expired VALID UNTIL is reported on stderr while --json stdout stays valid JSON; fails_when=the warning is dropped or printed to stdout; why_new=only pg.Rotation.Expired was tested; seam=none
+	// Value: protects=powers beyond the project are warned about on stderr and listed in --json's powers field; fails_when=the warning or the field is dropped; why_new=new warning; seam=none
+	t.Run("powers warn on stderr", func(t *testing.T) {
+		maker := project + "_pow"
+		exec("CREATE ROLE " + pgx.Identifier{maker}.Sanitize() + " LOGIN CREATEDB")
+		t.Cleanup(func() { admin.Exec(context.Background(), "DROP ROLE IF EXISTS "+pgx.Identifier{maker}.Sanitize()) })
+
+		var stdout, stderr bytes.Buffer
+		if code := Run([]string{"rotate-password", "--json", "--generate", maker}, strings.NewReader(""), &stdout, &stderr); code != exitOK {
+			t.Fatalf("exit code %d, stderr:\n%s", code, stderr.String())
+		}
+		res, _ := decode(t, stdout.String())
+		if !strings.Contains(stderr.String(), "powers beyond its project (CREATEDB)") || !slices.Equal(res.Powers, []string{"CREATEDB"}) {
+			t.Errorf("want the warning on stderr and powers [CREATEDB] in --json; stdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
+		}
+	})
+
+	// Value: protects=a template project database is warned about on stderr and flagged in --json; fails_when=the template flag stops reaching Rotation, or the warning or field is dropped; no_claim=the role's home and shown project are the same database here; why_new=Rotation.Template was only ever false in tests; seam=none
+	t.Run("template home warns on stderr", func(t *testing.T) {
+		// What the project's owner could do; the admin acts for the owner.
+		exec("ALTER DATABASE " + pgx.Identifier{project}.Sanitize() + " IS_TEMPLATE true")
+		// A template can't be dropped, so this runs before the test's cleanup.
+		t.Cleanup(func() {
+			if _, err := admin.Exec(context.Background(), "ALTER DATABASE "+pgx.Identifier{project}.Sanitize()+" IS_TEMPLATE false"); err != nil {
+				t.Errorf("turning IS_TEMPLATE off again: %v", err)
+			}
+		})
+
+		var stdout, stderr bytes.Buffer
+		if code := Run([]string{"rotate-password", "--json", "--generate", user}, strings.NewReader(""), &stdout, &stderr); code != exitOK {
+			t.Fatalf("exit code %d, stderr:\n%s", code, stderr.String())
+		}
+		res, _ := decode(t, stdout.String())
+		if !strings.Contains(stderr.String(), "role "+user+" is a template") || !res.Template {
+			t.Errorf("want the warning on stderr and template true in --json; stdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
+		}
+	})
+
+	// Value: protects=an expired VALID UNTIL is reported on stderr and as expired in --json; fails_when=the warning or the field is dropped, or the warning goes to stdout; why_new=only pg.Rotation.Expired was tested; seam=none
 	t.Run("expired role warns on stderr", func(t *testing.T) {
-		expired := "nellie_cli_it_exp_" + strings.ToLower(rand.Text()[:8])
+		expired := project + "_exp"
 		exec("CREATE ROLE " + pgx.Identifier{expired}.Sanitize() + " LOGIN VALID UNTIL '2000-01-01'")
 		t.Cleanup(func() { admin.Exec(context.Background(), "DROP ROLE IF EXISTS "+pgx.Identifier{expired}.Sanitize()) })
 
@@ -168,33 +227,42 @@ func TestRotatePasswordCommand(t *testing.T) {
 		if code := Run([]string{"rotate-password", "--json", "--generate", expired}, strings.NewReader(""), &stdout, &stderr); code != exitOK {
 			t.Fatalf("exit code %d, stderr:\n%s", code, stderr.String())
 		}
-		var res map[string]string
-		if err := json.Unmarshal(stdout.Bytes(), &res); err != nil {
-			t.Fatalf("stdout isn't JSON: %v\n%s", err, stdout.String())
-		}
-		if !strings.Contains(stderr.String(), "VALID UNTIL") || strings.Contains(stdout.String(), "VALID UNTIL") {
-			t.Errorf("the warning belongs on stderr only; stdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
+		res, _ := decode(t, stdout.String())
+		if !strings.Contains(stderr.String(), "VALID UNTIL") || strings.Contains(stdout.String(), "VALID UNTIL") || !res.Expired {
+			t.Errorf("want the warning on stderr only and expired true in --json; stdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
 		}
 	})
 
-	t.Run("no project database", func(t *testing.T) {
-		out, _ := run(t, "", orphan, "--json", "--generate")
-		var res map[string]string
-		if err := json.Unmarshal([]byte(out), &res); err != nil {
-			t.Fatalf("stdout isn't JSON: %v\n%s", err, out)
+	// Value: protects=a role outside every project is refused with exit 1 and nothing on stdout; fails_when=rotate-password changes passwords of roles nellie list doesn't show; why_new=adversarial review: Postgres 15 lets a CREATEROLE admin rotate any ordinary role; seam=none
+	t.Run("outside every project", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := Run([]string{"rotate-password", "--json", "--generate", orphan}, strings.NewReader(""), &stdout, &stderr)
+		if code != exitError || stdout.Len() != 0 || !strings.Contains(stderr.String(), "isn't in any project") {
+			t.Errorf("exit %d, stdout %q, stderr %q; want exit 1 and a refusal", code, stdout.String(), stderr.String())
 		}
-		if _, ok := res["database"]; ok {
-			t.Errorf("database present without a project: %s", out)
-		}
-		if _, ok := res["url"]; ok {
-			t.Errorf("url present without a project: %s", out)
-		}
-		canLogIn(t, orphan, res["password"], "")
+	})
 
-		human, _ := run(t, "", orphan, "--generate")
+	// A project role that can't connect gets no URL.
+	t.Run("no usable project database", func(t *testing.T) {
+		stuck := project + "_stuck"
+		id := pgx.Identifier{stuck}.Sanitize()
+		exec("CREATE ROLE " + id + " LOGIN CONNECTION LIMIT 0")
+		t.Cleanup(func() { admin.Exec(context.Background(), "DROP ROLE IF EXISTS "+id) })
+
+		human, _ := run(t, "", stuck, "--generate")
 		if !strings.Contains(human, "password: ") || strings.Contains(human, "postgres://") {
 			t.Errorf("without a URL the generated password should be printed on its own:\n%s", human)
 		}
+		out, _ := run(t, "", stuck, "--json", "--generate")
+		res, raw := decode(t, out)
+		if _, ok := raw["database"]; ok {
+			t.Errorf("database present for a role that can't connect: %s", out)
+		}
+		if _, ok := raw["url"]; ok {
+			t.Errorf("url present for a role that can't connect: %s", out)
+		}
+		exec("ALTER ROLE " + id + " CONNECTION LIMIT -1")
+		canLogIn(t, stuck, res.Password, project)
 	})
 }
 

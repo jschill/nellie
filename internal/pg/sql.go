@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -28,6 +29,59 @@ var (
 	// created, so a role or database may be left behind.
 	ErrCleanupFailed = errors.New("cleanup failed")
 )
+
+// pinSearchPath is the first statement pinSession runs.
+const pinSearchPath = "SET search_path = pg_catalog, pg_temp"
+
+// pinSession prepares the admin connection of every command, all of
+// which read catalogs and call functions by unqualified name. The owner of
+// the connection database controls two settings that would mislead nellie:
+//   - search_path, which can put the owner's schema first and fake pg_roles
+//     (or "="), so it's pinned to pg_catalog;
+//   - role (ALTER DATABASE ... SET role), which makes sessions act as another
+//     role, so nellie would see and do only what that role can.
+//
+// The role check fails closed: a session acting as another role is refused
+// unless the admin's own settings explain it (ALTER ROLE <admin> [IN
+// DATABASE ...] SET role), which only the admin, or a role with power over
+// it, can change. Checking the database's setting instead would race: its
+// owner could clear the setting between the connect and the check.
+func pinSession(ctx context.Context, conn *pgx.Conn) error {
+	if _, err := conn.Exec(ctx, pinSearchPath); err != nil {
+		return fmt.Errorf("setting search_path: %w", err)
+	}
+	var db, current, session string
+	var switched, byDatabase bool
+	err := conn.QueryRow(ctx, `
+		SELECT current_database(), current_user, session_user,
+			current_user <> session_user AND NOT EXISTS (
+				SELECT FROM pg_db_role_setting s
+				WHERE s.setrole = (SELECT oid FROM pg_roles WHERE rolname = session_user)
+					AND s.setdatabase IN (0, (SELECT oid FROM pg_database WHERE datname = current_database()))
+					AND 'role=' || current_user = ANY (s.setconfig)),
+			EXISTS (
+				SELECT FROM pg_db_role_setting s
+				WHERE s.setrole = 0
+					AND s.setdatabase = (SELECT oid FROM pg_database WHERE datname = current_database())
+					AND EXISTS (SELECT FROM unnest(s.setconfig) c WHERE starts_with(c, 'role=')))`,
+	).Scan(&db, &current, &session, &switched, &byDatabase)
+	if err != nil {
+		return fmt.Errorf("checking the session's role: %w", err)
+	}
+	if switched {
+		// The refusal above doesn't depend on this, so a racing owner can
+		// only change the advice, not whether nellie refuses.
+		cause := "a role or options parameter in the admin's connection settings (the URL, PGOPTIONS or a service file); remove it"
+		if byDatabase {
+			cause = fmt.Sprintf("ALTER DATABASE %q SET role, which the database's owner controls; connect the admin to another database, such as postgres", db)
+		}
+		// %q: the names come from the catalog, and the database's owner picks
+		// the role, so they're quoted rather than sent to the terminal raw.
+		return fmt.Errorf("the session acts as role %q instead of %q, and the admin's own role settings don't explain it; "+
+			"the likely cause is %s", current, session, cause)
+	}
+	return nil
+}
 
 // Plan is SQL grouped by where and how it runs. Empty groups are skipped.
 type Plan struct {
@@ -87,6 +141,98 @@ func checkServerVersion(ctx context.Context, conn *pgx.Conn) error {
 func checkVersion(version int) error {
 	if version < minServerVersion {
 		return fmt.Errorf("server runs Postgres %d; nellie needs %d or newer", version/10000, minServerVersion/10000)
+	}
+	return nil
+}
+
+// lockAddKey is the advisory lock that add-project and add-user hold from
+// their name checks until they're done, so two nellie runs can't both pass
+// the checks and then create overlapping names. Advisory locks are per
+// database, so this serializes runs whose admin connects to the same one.
+const lockAddKey = 0x6e656c6c6965 // "nellie"
+
+// LockWait, if set, is called when add-project or add-user finds another
+// nellie run holding the lock and starts waiting for it, so the caller can
+// say why nothing happens. The pg package itself never prints.
+var LockWait func()
+
+// lockAdd takes lockAddKey for the rest of conn's session; closing conn
+// releases it. If another run holds it, it calls LockWait and waits, until
+// ctx is done.
+func lockAdd(ctx context.Context, conn *pgx.Conn) error {
+	var got bool
+	if err := conn.QueryRow(ctx, "SELECT pg_try_advisory_lock($1)", int64(lockAddKey)).Scan(&got); err != nil {
+		return fmt.Errorf("taking nellie's lock: %w", err)
+	}
+	if got {
+		return nil
+	}
+	if LockWait != nil {
+		LockWait()
+	}
+	if _, err := conn.Exec(ctx, "SELECT pg_advisory_lock($1)", int64(lockAddKey)); err != nil {
+		return fmt.Errorf("waiting for another nellie run: %w", err)
+	}
+	return nil
+}
+
+// ErrAmbiguous means a new name would make nellie's name-to-project mapping
+// ambiguous: list and rotate-password assign a role to the longest database
+// its name matches, so names must not overlap.
+var ErrAmbiguous = errors.New("name would be ambiguous")
+
+// checkProjectNameUnambiguous refuses a project name that would move an
+// existing user: a login role named <name>_... whose home (the longest
+// database its name matches, as nellie list decides) is shorter than <name>
+// today, or missing, would become this project's user. Roles a longer
+// database already claims stay where they are, so databases alone never
+// refuse a name, and neither do roles list never shows as users (NOLOGIN, the
+// admin itself). The caller has pinned the session (pinSession).
+func checkProjectNameUnambiguous(ctx context.Context, conn *pgx.Conn, name string) error {
+	var moved []string
+	err := conn.QueryRow(ctx, `
+		SELECT ARRAY(SELECT r.rolname::text FROM pg_roles r
+			WHERE r.rolcanlogin AND r.rolname NOT IN (current_user, session_user)
+				AND starts_with(r.rolname, $1 || '_')
+				AND NOT EXISTS (SELECT FROM pg_database d
+					WHERE length(d.datname) > length($1)
+						AND (r.rolname = d.datname OR starts_with(r.rolname, d.datname || '_')))
+			ORDER BY 1)`,
+		name,
+	).Scan(&moved)
+	if err != nil {
+		return fmt.Errorf("checking for roles named %s_...: %w", name, err)
+	}
+	if len(moved) > 0 {
+		quoted := make([]string, len(moved))
+		for i, r := range moved {
+			// %q-style: names come from the catalog, so no raw control
+			// characters reach the terminal.
+			quoted[i] = strconv.Quote(r)
+		}
+		return fmt.Errorf("%w: project %s would claim existing login role(s) %s as its users, since nellie tells projects apart by name prefix; pick another project name",
+			ErrAmbiguous, name, strings.Join(quoted, ", "))
+	}
+	return nil
+}
+
+// checkUserNameUnambiguous refuses a user name that a database longer than
+// its project would claim: user shop_v2_app of project shop while a database
+// shop_v2 exists. The caller has pinned the session (pinSession).
+func checkUserNameUnambiguous(ctx context.Context, conn *pgx.Conn, user, project string) error {
+	var dbs []string
+	err := conn.QueryRow(ctx, `
+		SELECT ARRAY(SELECT datname::text FROM pg_database
+			WHERE datname = ANY($1::text[]) AND length(datname) > length($2)
+			ORDER BY length(datname) DESC)`,
+		projectCandidates(user), project,
+	).Scan(&dbs)
+	if err != nil {
+		return fmt.Errorf("checking for databases that would claim %s: %w", user, err)
+	}
+	if len(dbs) > 0 {
+		return fmt.Errorf("%w: user %s would belong to database %q by name, not to project %s; pick another suffix",
+			ErrAmbiguous, user, dbs[0], project)
 	}
 	return nil
 }
