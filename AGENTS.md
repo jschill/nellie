@@ -3,6 +3,8 @@
 Instructions for AI coding agents working in this repo. The project conventions,
 data model and safety rules live in [CLAUDE.md](CLAUDE.md); read it first.
 
+Read [Shared memory (Conaire)](docs/conaire.md) for the shared memory workflow.
+
 ## Commits
 
 - **Always use signed commits.** Create every commit with `git commit -S`
