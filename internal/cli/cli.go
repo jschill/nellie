@@ -43,6 +43,7 @@ Usage: nellie <command> [flags]
 
 Commands:
   add-project       create a database and a role with the same name that owns it
+  delete-project    permanently delete a database and its project roles
   add-user          add a user to a project: application (reads and writes) or admin
   rotate-password   give a user a new password
   list              list projects and their users (also: trumpet)
@@ -102,6 +103,8 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	switch args[0] {
 	case "add-project":
 		return addProject(args[1:], stdin, stdout, stderr)
+	case "delete-project":
+		return deleteProject(args[1:], stdin, stdout, stderr)
 	case "add-user":
 		return addUser(args[1:], stdin, stdout, stderr)
 	case "rotate-password":

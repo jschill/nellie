@@ -52,10 +52,22 @@ Short, lowercase, verb-noun subcommands:
 
 ```
 nellie add-project     # asks for the name (done)
+nellie delete-project [<project>] # confirms the name, deletes database and project roles
 nellie add-user        # asks for project and user name (done)
 nellie rotate-password [<user>]   # asks for the user if not given (done)
 nellie list            # alias: nellie trumpet (done)
 ```
+
+`delete-project` reads the database and its roles from the catalogs, previews
+all of them, and requires the exact project name before deleting. Its `--dry-run`
+also connects, but only reads catalogs and prints the planned drops. It refuses
+unsafe targets and outside dependencies, and never terminates sessions or uses
+`DROP OWNED`. The database drops first (not transactional); role drops run in
+one transaction. It shares `lockAdd` with creation and rechecks after confirmation.
+Cleanup protects each role with a transactional `ALTER ROLE ... NOLOGIN` row
+update before rechecking its OID and powers and dropping it. Failures roll back
+those updates. Preview and confirmation-prompt write errors cancel deletion.
+The dry-run script is for inspection; role identity and power checks run in Go.
 
 `rotate-password` asks for the new password; empty input on a terminal, or
 `--generate`, generates one.
@@ -297,9 +309,12 @@ These are non-negotiable — the tool creates roles and sets passwords.
 
   ```
   go test -tags integration ./internal/pg/ \
-    -run 'TestList|TestPinSession|TestRotatePassword|TestNames|TestProjectName|TestAddUserExplains|TestAddWaits'
+    -run 'TestDeleteProject|TestList|TestPinSession|TestRotatePassword|TestNames|TestProjectName|TestAddUserExplains|TestAddWaits'
+  go test -tags integration ./internal/cli/ -run TestDeleteProject
   ```
 
+  Run these superuser commands sequentially: deletion tests deliberately lock
+  `pg_authid`, and concurrent package runs can block each other's fixtures.
   (Not the whole suite: tests such as `TestAddUserNeedsMembershipInOwner`
   assume a non-superuser admin.)
 
