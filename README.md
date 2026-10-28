@@ -198,6 +198,44 @@ If another nellie run is creating a project or user on the same server,
 A user name that a longer database would claim is refused: with a database
 `shop_v2`, project `shop` can't get a user `shop_v2_app`. Pick another suffix.
 
+### `nellie delete-project [<project>]`
+
+Permanently delete a project's database, all its data, and its owner and user
+roles. Nellie shows the database and roles, then requires you to type the
+**exact project name** to confirm. An empty or different answer cancels.
+Omit the argument to be asked for the project name.
+
+```bash
+nellie delete-project --dry-run shop
+nellie delete-project shop
+# Type the project name "shop" to confirm deletion: shop
+```
+
+Connect the admin to another database, such as `postgres`. Unlike other dry
+runs, `delete-project --dry-run` connects to read catalogs so it can print
+the actual database and role drops; it changes nothing and needs no confirmation.
+The output is for inspection: Nellie performs the role identity and privilege
+checks while executing, so do not replay the printed script directly. Non-printing
+characters in catalog role names appear as visible escapes.
+User roles belong to the longest database name they match, as for `list`,
+including roles switched to `NOLOGIN`. Longer overlapping projects stay intact.
+
+Deletion refuses templates, system databases, a foreign owner, the admin's
+own role, roles with powers or dependencies outside the project (including
+dependencies inherited through group roles), and roles
+the admin cannot drop. Close active project connections first; Nellie does
+not terminate them. There is no `--force` flag or confirmation bypass.
+
+Postgres cannot drop a database inside a transaction. Nellie drops it first,
+then protects and drops all selected roles in one transaction. A transactional
+`NOLOGIN` update holds each role's catalog row while Nellie rechecks its internal
+ID and powers. A replaced or newly privileged role cancels cleanup. If cleanup
+fails, the login changes roll back, and Nellie reports that the database is gone
+and names the roles that may remain. It never uses
+`DROP OWNED` to remove objects in other databases. Its advisory lock serializes
+`add-*` and deletion on the same admin database; external tools do not honor
+that lock, so avoid concurrent manual changes while deleting.
+
 ### `nellie rotate-password [<user>]`
 
 Gives a user, or a project owner, a new password. Asks for the user if you
@@ -325,7 +363,7 @@ allow that). If a project you expect is missing on Postgres 15, check with
 
 | Flag | |
 | --- | --- |
-| `--dry-run` | Print the SQL instead of running it. Doesn't connect. Passwords show as `<redacted>`. All commands (for `list`, the query it runs, after pinning `search_path`). |
+| `--dry-run` | Print the SQL instead of running it. Doesn't connect except for `delete-project`, which reads the actual roles from catalogs. Passwords show as `<redacted>`. All commands (for `list`, the query it runs, after pinning `search_path`). |
 | `--generate` | Generate the new password without asking. `rotate-password` only. |
 | `--json` | Print the result as JSON, not together with `--dry-run`. Non-printing characters in names are escaped as `\uXXXX`. `rotate-password`: `user`; `database` and `url` when the role's project database is usable (see `rotate-password` above); `password` only if nellie generated it; `expired` (the role's `VALID UNTIL` has passed), `template` (its project is a template) and `powers` (as in `list`, `[]` for none), always present. `list`: an array of `{"project", "owner", "owner_powers", "template", "foreign_owner", "users": [{"name", "type", "admin", "powers", "belongs_to", "can_connect", "expired"}]}`, where `type` is `application`, `admin` or `privileged`, `admin` says the user is a member of the owner (also when it's `privileged`), `powers` and `owner_powers` are arrays with one power each (`[]` for none), and `belongs_to` names the database a user's name belongs to when that isn't the project (`""` otherwise). |
 

@@ -45,7 +45,9 @@ func (p *prompter) line(label string) (string, error) {
 
 // rawLine is like line, but keeps spaces at either end.
 func (p *prompter) rawLine(label string) (string, error) {
-	fmt.Fprint(p.out, label)
+	if _, err := fmt.Fprint(p.out, label); err != nil {
+		return "", err
+	}
 	if !p.in.Scan() {
 		fmt.Fprintln(p.out)
 		if err := p.in.Err(); err != nil {

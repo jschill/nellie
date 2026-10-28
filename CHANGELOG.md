@@ -3,6 +3,15 @@
 All notable changes to nellie are listed here, newest first. The version lives
 in `VERSION`; releases are tagged `vMAJOR.MINOR.PATCH`.
 
+## [0.4.0.0] - 2026-10-28
+
+### Added
+
+- Pack up a project and send its whole circus home with `nellie delete-project
+  [<project>]`: preview the database and its roles, then type the exact project
+  name to confirm permanent deletion. `--dry-run` reads the catalogs and prints
+  SQL without changing anything; overlapping projects keep their own tents.
+
 ## [0.3.0.0] - 2026-10-11
 
 *Nellie lifts her trunk and trumpets the whole circus: every tent, every
