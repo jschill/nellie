@@ -182,8 +182,13 @@ func deletionPlan(ctx context.Context, conn *pgx.Conn, name string) (Deletion, e
 			return plan, fmt.Errorf("refusing to delete role %q with powers outside the project: %s", role, strings.Join(powers, ", "))
 		}
 		var dependencies bool
-		err = conn.QueryRow(ctx, `SELECT EXISTS(SELECT FROM pg_shdepend s
-   WHERE s.refclassid='pg_authid'::regclass AND s.refobjid=(SELECT oid FROM pg_roles WHERE rolname=$1)
+		err = conn.QueryRow(ctx, `WITH RECURSIVE reachable(oid) AS (
+   SELECT oid FROM pg_roles WHERE rolname=$1
+   UNION
+   SELECT m.roleid FROM pg_auth_members m JOIN reachable r ON m.member=r.oid
+ )
+ SELECT EXISTS(SELECT FROM pg_shdepend s
+   WHERE s.refclassid='pg_authid'::regclass AND s.refobjid IN (SELECT oid FROM reachable)
    AND s.dbid<>$2 AND NOT(s.dbid=0 AND s.classid='pg_database'::regclass AND s.objid=$2))`, role, oid).Scan(&dependencies)
 		if err != nil {
 			return plan, fmt.Errorf("checking dependencies of role %q: %w", role, err)

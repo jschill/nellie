@@ -215,12 +215,14 @@ Connect the admin to another database, such as `postgres`. Unlike other dry
 runs, `delete-project --dry-run` connects to read catalogs so it can print
 the actual database and role drops; it changes nothing and needs no confirmation.
 The output is for inspection: Nellie performs the role identity and privilege
-checks while executing, so do not replay the printed script directly.
+checks while executing, so do not replay the printed script directly. Non-printing
+characters in catalog role names appear as visible escapes.
 User roles belong to the longest database name they match, as for `list`,
 including roles switched to `NOLOGIN`. Longer overlapping projects stay intact.
 
 Deletion refuses templates, system databases, a foreign owner, the admin's
-own role, roles with powers or dependencies outside the project, and roles
+own role, roles with powers or dependencies outside the project (including
+dependencies inherited through group roles), and roles
 the admin cannot drop. Close active project connections first; Nellie does
 not terminate them. There is no `--force` flag or confirmation bypass.
 

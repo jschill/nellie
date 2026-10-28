@@ -59,7 +59,9 @@ func deleteProject(args []string, stdin io.Reader, stdout, stderr io.Writer) int
 	pg.LockWait = func() { fmt.Fprintln(stderr, "nellie: waiting for another nellie run to finish (Ctrl-C to stop)") }
 	err = pg.DeleteProject(ctx, cfg, name, opts.dryRun, func(plan pg.Deletion) error {
 		if opts.dryRun {
-			_, e := fmt.Fprint(stdout, plan.Script())
+			// Catalog role names can contain terminal controls; this is an
+			// inspection script, so show those characters as visible escapes.
+			_, e := fmt.Fprint(stdout, terminalSafe(plan.Script()))
 			return e
 		}
 		if _, err := fmt.Fprintf(stderr, "Permanently delete database %q and ALL its data.\nRoles to delete:\n", plan.Project); err != nil {

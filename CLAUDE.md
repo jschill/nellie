@@ -68,6 +68,9 @@ Cleanup protects each role with a transactional `ALTER ROLE ... NOLOGIN` row
 update before rechecking its OID and powers and dropping it. Failures roll back
 those updates. Preview and confirmation-prompt write errors cancel deletion.
 The dry-run script is for inspection; role identity and power checks run in Go.
+Outside dependency checks follow group memberships, and dry-run output escapes
+non-printing catalog characters. See the approved
+[deletion design](docs/superpowers/specs/2026-10-25-delete-project-design.md).
 
 `rotate-password` asks for the new password; empty input on a terminal, or
 `--generate`, generates one.
