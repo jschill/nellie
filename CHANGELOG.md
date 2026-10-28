@@ -3,7 +3,7 @@
 All notable changes to nellie are listed here, newest first. The version lives
 in `VERSION`; releases are tagged `vMAJOR.MINOR.PATCH`.
 
-## [Unreleased]
+## [0.4.0.0] - 2026-10-28
 
 ### Added
 
